@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Local scratch & private validation notes
+.scratch/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.log
+
+# Build & release artifacts
+dist/
+*.zip
+
+# OS & Editor metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/

@@ -1,0 +1,37 @@
+{
+  "name": "x-image-slicer",
+  "version": "0.1.0",
+  "private": true,
+  "author": "321sssrt-bit",
+  "license": "MIT",
+  "description": "Chrome/Edge MV3 extension to slice a single static image horizontally (1xN, 2-20 slices, recommended 5/8/20) with up to 500MP auto-optimization and fill directly into the X (Twitter) post composer.",
+  "homepage": "https://github.com/321sssrt-bit/x-image-slicer#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/321sssrt-bit/x-image-slicer.git"
+  },
+  "bugs": {
+    "url": "https://github.com/321sssrt-bit/x-image-slicer/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "x",
+    "twitter",
+    "image-slicer",
+    "panorama",
+    "carousel",
+    "chrome-extension",
+    "edge-extension",
+    "manifest-v3"
+  ],
+  "scripts": {
+    "test": "node tests/e2e/run.js",
+    "pack": "node scripts/pack.js"
+  },
+  "devDependencies": {
+    "playwright": "^1.52.0",
+    "pngjs": "^7.0.0"
+  }
+}

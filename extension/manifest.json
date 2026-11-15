@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "X Image Slicer (X 切图助手)",
+  "version": "0.1.0",
+  "description": "将单张静态图片左右等分为 2～20 张切片（默认 8 张，推荐 5 / 8 / 20 张），支持框内切图、5 亿像素大图自动优化，并按顺序填入 X 新建帖子发帖框。",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://x.com/*",
+        "https://twitter.com/*"
+      ],
+      "js": [
+        "src/image-processor.js",
+        "src/composer-adapter.js",
+        "src/modal-ui.js",
+        "src/content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

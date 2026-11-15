@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>Mock X Composer Fixture</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f7f9f9;
+      margin: 0;
+      padding: 24px;
+      color: #0f1419;
+    }
+    .layout {
+      max-width: 720px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+    .composer-card {
+      background: #ffffff;
+      border: 1px solid #cfd9de;
+      border-radius: 16px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .composer-label {
+      font-size: 12px;
+      font-weight: 700;
+      color: #536471;
+    }
+    .editor-label {
+      display: block;
+    }
+    .editor {
+      min-height: 56px;
+      padding: 10px 12px;
+      border: 1px solid #e1e8ed;
+      border-radius: 10px;
+      font-size: 15px;
+      outline: none;
+    }
+    .attachments {
+      display: flex;
+      flex-wrap: nowrap;
+      gap: 8px;
+      overflow-x: auto;
+    }
+    .attachments:empty {
+      display: none;
+    }
+    .carousel-group {
+      display: flex;
+      flex-wrap: nowrap;
+      gap: 8px;
+    }
+    .attachments.wrap-grid,
+    .carousel-group.wrap-grid {
+      flex-wrap: wrap;
+      max-width: 470px;
+      overflow-x: visible;
+    }
+    .attachments.row-reverse,
+    .carousel-group.row-reverse {
+      flex-direction: row-reverse;
+    }
+    .attachment-item,
+    .carousel-slot {
+      position: relative;
+      width: 84px;
+      height: 112px;
+      border: 1px solid #cfd9de;
+      border-radius: 10px;
+      overflow: hidden;
+      flex: 0 0 auto;
+      background: #eff3f4;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .attachment-item img,
+    .carousel-slot img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .spinner {
+      position: absolute;
+      inset: 0;
+      background: rgba(15, 20, 25, 0.45);
+      color: #ffffff;
+      font-size: 11px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .upload-error {
+      color: #b42318;
+      background: #fef1f2;
+      border: 1px solid #f9b4bc;
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 12px;
+    }
+    .toolbar-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-top: 1px solid #eff3f4;
+      padding-top: 10px;
+    }
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .icon-list {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .post-btn {
+      background: #1d9bf0;
+      color: #ffffff;
+      border: none;
+      border-radius: 9999px;
+      padding: 8px 18px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .post-btn[aria-disabled="true"] {
+      opacity: 0.5;
+    }
+    .poll-box {
+      border: 1px solid #cfd9de;
+      border-radius: 10px;
+      padding: 10px;
+      background: #f7f9f9;
+    }
+    .toast-layer {
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 100;
+    }
+  </style>
+</head>
+<body>
+  <main class="layout">
+    <section id="inline-composer" class="composer-card" data-composer-id="inline">
+      <div class="composer-label">首页内联新建帖子发帖框（模拟真实 X 多层包装与工具栏）</div>
+      <label class="editor-label" data-testid="tweetTextarea_0_label">
+        <div data-testid="tweetTextarea_0RichTextInputContainer">
+          <div
+            class="editor"
+            contenteditable="true"
+            role="textbox"
+            aria-label="发帖正文"
+            data-testid="tweetTextarea_0"
+          ><span class="public-DraftEditorPlaceholder-root" aria-hidden="true">有什么新鲜事？</span></div>
+        </div>
+      </label>
+      <div class="attachments" data-testid="attachments"></div>
+      <div class="toolbar-row">
+        <div class="toolbar" data-testid="toolBar">
+          <div class="icon-list" data-testid="ScrollSnap-List">
+            <input type="file" data-testid="fileInput" multiple accept="image/*" style="display: none" />
+            <button type="button" data-testid="createPoll" aria-label="Add poll">投票</button>
+          </div>
+          <button type="button" class="post-btn" data-testid="tweetButtonInline">Post</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="modal-dialog-wrapper" role="dialog" aria-label="新建帖子弹窗" hidden>
+      <div id="modal-composer" class="composer-card" data-composer-id="modal">
+        <div class="composer-label">弹窗新建帖子发帖框</div>
+        <label class="editor-label" data-testid="tweetTextarea_0_label">
+          <div data-testid="tweetTextarea_0RichTextInputContainer">
+            <div
+              class="editor"
+              contenteditable="true"
+              role="textbox"
+              aria-label="弹窗发帖正文"
+              data-testid="tweetTextarea_0"
+            ></div>
+          </div>
+        </label>
+        <div class="attachments" data-testid="attachments"></div>
+        <div class="toolbar-row">
+          <div class="toolbar" data-testid="toolBar">
+            <div class="icon-list" data-testid="ScrollSnap-List">
+              <input type="file" data-testid="fileInput" multiple accept="image/*" style="display: none" />
+              <button type="button" data-testid="createPoll" aria-label="Add poll">投票</button>
+            </div>
+            <button type="button" class="post-btn" data-testid="tweetButton">Post</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="reply-composer" class="composer-card" data-composer-id="reply">
+      <div class="composer-label">繁体中文回复框（非新建帖子发帖框）</div>
+      <div
+        class="editor"
+        contenteditable="true"
+        role="textbox"
+        aria-label="回覆正文"
+        data-testid="tweetTextarea_0"
+      ></div>
+      <div class="attachments" data-testid="attachments"></div>
+      <div class="toolbar-row">
+        <div class="toolbar" data-testid="toolBar">
+          <input type="file" data-testid="fileInput" multiple accept="image/*" style="display: none" />
+        </div>
+        <button type="button" class="post-btn" data-testid="tweetButtonInline">回覆</button>
+      </div>
+    </section>
+
+    <section id="quote-composer" class="composer-card" data-composer-id="quote">
+      <div class="composer-label">引用帖子框（非独立新建帖子发帖框）</div>
+      <div
+        class="editor"
+        contenteditable="true"
+        role="textbox"
+        aria-label="引用正文"
+        data-testid="tweetTextarea_0"
+      ></div>
+      <div data-testid="quoteTweet">被引用的原帖</div>
+      <div class="attachments" data-testid="attachments"></div>
+      <div class="toolbar-row">
+        <div class="toolbar" data-testid="toolBar">
+          <input type="file" data-testid="fileInput" multiple accept="image/*" style="display: none" />
+        </div>
+        <button type="button" class="post-btn" data-testid="tweetButton">Post</button>
+      </div>
+    </section>
+  </main>
+  <div id="toast-layer" class="toast-layer"></div>
+  <script src="https://x.com/mock-x.js"></script>
+</body>
+</html>
