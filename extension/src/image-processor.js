@@ -763,12 +763,17 @@
     return dividers;
   }
 
+  // x of 分割线 k in a 左右等分 of `width` into `sliceCount` regions (k = 0 and k = sliceCount are the image edges)
+  function equalSplitX(width, sliceCount, k) {
+    return Math.floor((k * width) / sliceCount);
+  }
+
   // Each region is the union of adjacent 等分 regions between two kept 分割线, so the group still covers the full width
   function computeSliceRegions(width, height, sliceCount, mergedDividers) {
     const merged = new Set(mergedDividers);
     const boundaries = [0];
     for (let k = 1; k < sliceCount; k++) {
-      if (!merged.has(k)) boundaries.push(Math.floor((k * width) / sliceCount));
+      if (!merged.has(k)) boundaries.push(equalSplitX(width, sliceCount, k));
     }
     boundaries.push(width);
     const regions = [];
@@ -1576,6 +1581,7 @@
     DEFAULT_SLICE_COUNT,
     parseSliceCountInput,
     formatBytes,
+    equalSplitX,
     sliceImageFile
   };
 })();

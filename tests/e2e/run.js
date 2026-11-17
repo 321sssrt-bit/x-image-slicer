@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { chromium } = require('playwright');
+const { PNG } = require('pngjs');
 const {
   createPatternPng,
   createSemiTransparentPng,
@@ -107,6 +108,7 @@ async function getModalLocators(page) {
     presetBtn: (n) => host.locator(`[data-action="preset-count"][data-count="${n}"]`),
     sliceBadge: host.locator('.slice-badge'),
     splitModeBtn: (mode) => host.locator(`[data-action="split-mode"][data-split-mode="${mode}"]`),
+    clearMergesBtn: host.getByRole('button', { name: '清除合并' }),
     status: host.locator('.status'),
     summary: host.locator('.summary'),
     cards: host.locator('.slice-card'),
@@ -178,6 +180,30 @@ async function evaluateInExtensionWorld(page, expression) {
   } finally {
     await client.detach();
   }
+}
+
+// Waits until the slicer preview shows exactly `count` slice cards from a finished generation
+async function waitForSlicePreview(page, count, timeout = 30000) {
+  await page.waitForFunction(
+    (n) => {
+      const sr = document.querySelector('#x-slicer-modal-host')?.shadowRoot;
+      return (
+        sr?.querySelectorAll('.slice-card').length === n &&
+        sr.querySelector('.status')?.getAttribute('data-tone') === 'success'
+      );
+    },
+    count,
+    { timeout }
+  );
+}
+
+async function readPreviewPngs(modal) {
+  const all = await modal.cards.evaluateAll(async (cards) =>
+    Promise.all(
+      cards.map(async (c) => Array.from(new Uint8Array(await (await fetch(c.querySelector('img').src)).arrayBuffer())))
+    )
+  );
+  return all.map((bytes) => Buffer.from(bytes));
 }
 
 async function auditPageStorage(page) {
@@ -5506,18 +5532,6 @@ async function runTests() {
     await runCase('26_free_split_merge_dividers_reslice_from_original_and_fill', async (page) => {
       try {
         const entryBtn = page.locator('#inline-composer button[data-x-slicer-entry="true"]');
-        const waitForPreview = (count, timeout = 30000) =>
-          page.waitForFunction(
-            (n) => {
-              const sr = document.querySelector('#x-slicer-modal-host')?.shadowRoot;
-              return (
-                sr?.querySelectorAll('.slice-card').length === n &&
-                sr.querySelector('.status')?.getAttribute('data-tone') === 'success'
-              );
-            },
-            count,
-            { timeout }
-          );
         const mergeBtn = (modal, left) => modal.host.getByRole('button', { name: `合并第 ${left} 张与第 ${left + 1} 张切片` });
         const allMergeBtns = (modal) => modal.host.getByRole('button', { name: /^合并第 \d+ 张与第 \d+ 张切片$/ });
 
@@ -5529,7 +5543,7 @@ async function runTests() {
         let modal = await getModalLocators(page);
         await modal.splitModeBtn('free').click();
         await modal.fileInput.setInputFiles(patPath);
-        await waitForPreview(8);
+        await waitForSlicePreview(page, 8);
         assert.equal(await allMergeBtns(modal).count(), 7, '8 slices have 7 dividers');
 
         const mark = mergeBtn(modal, 3).locator('.divider-mark');
@@ -5544,7 +5558,7 @@ async function runTests() {
         );
 
         await mergeBtn(modal, 3).click();
-        await waitForPreview(7);
+        await waitForSlicePreview(page, 7);
         assert.equal(await modal.sliceBadge.textContent(), '8 等分 · 合并后 7 张');
         assert.equal(await allMergeBtns(modal).count(), 6);
 
@@ -5570,14 +5584,6 @@ async function runTests() {
         );
 
         // 26b. Consecutive merges: 两侧窄、中间宽 (等分 regions 2..7 in one slice), then down to the 2-slice minimum
-        const readPreviewPngs = async (m) =>
-          (
-            await m.cards.evaluateAll(async (cards) =>
-              Promise.all(
-                cards.map(async (c) => Array.from(new Uint8Array(await (await fetch(c.querySelector('img').src)).arrayBuffer())))
-              )
-            )
-          ).map((bytes) => Buffer.from(bytes));
         await page.evaluate(() => {
           document.querySelector('#inline-composer [data-testid="attachments"]').innerHTML = '';
           document.querySelector('#inline-composer [data-x-slicer-feedback="true"]')?.remove();
@@ -5587,17 +5593,17 @@ async function runTests() {
         await entryBtn.click();
         modal = await getModalLocators(page);
         await modal.fileInput.setInputFiles(patPath);
-        await waitForPreview(8);
+        await waitForSlicePreview(page, 8);
         for (let merges = 1; merges <= 5; merges++) {
           await mergeBtn(modal, 2).click();
-          await waitForPreview(8 - merges);
+          await waitForSlicePreview(page, 8 - merges);
         }
         assert.equal(await modal.sliceBadge.textContent(), '8 等分 · 合并后 3 张');
         assert.match(await modal.summary.textContent(), /3 张 PNG 切片（8 等分 · 合并后 3 张/);
         reassembleAndVerifyPngSlices(await readPreviewPngs(modal), pat.rgba, pat.width, pat.height, [24, 148, 25]);
 
         await mergeBtn(modal, 1).click();
-        await waitForPreview(2);
+        await waitForSlicePreview(page, 2);
         assert.equal(await modal.sliceBadge.textContent(), '8 等分 · 合并后 2 张');
         reassembleAndVerifyPngSlices(await readPreviewPngs(modal), pat.rgba, pat.width, pat.height, [172, 25]);
         assert.equal(await allMergeBtns(modal).count(), 1);
@@ -5613,7 +5619,7 @@ async function runTests() {
         await entryBtn.click();
         modal = await getModalLocators(page);
         await modal.fileInput.setInputFiles(patPath);
-        await waitForPreview(8);
+        await waitForSlicePreview(page, 8);
         const duringRegen = await page.evaluate(() => {
           const sr = document.querySelector('#x-slicer-modal-host').shadowRoot;
           const submit = sr.querySelector('[data-action="submit"]');
@@ -5643,7 +5649,7 @@ async function runTests() {
         assert.match(duringRegen.statusText, /重新生成 7 张切片/);
         assert.equal(duringRegen.badgeAfterSecond, '8 等分 · 合并后 6 张');
         assert.equal(duringRegen.submitDisabled, true);
-        await waitForPreview(6);
+        await waitForSlicePreview(page, 6);
         assert.equal(await modal.host.locator('.preview-strip').getAttribute('aria-busy'), null);
         assert.equal((await page.evaluate(() => window.__mockX.getState())).submissions.length, 0, 'Stale result must not be filled');
         await modal.submitBtn.click();
@@ -5670,7 +5676,7 @@ async function runTests() {
         await entryBtn.click();
         modal = await getModalLocators(page);
         await modal.fileInput.setInputFiles(semiWidePath);
-        await waitForPreview(8, 60000);
+        await waitForSlicePreview(page, 8, 60000);
         assert.match(await modal.summary.textContent(), /未缩小/);
         await page.evaluate(() => {
           const sr = document.querySelector('#x-slicer-modal-host').shadowRoot;
@@ -5678,7 +5684,7 @@ async function runTests() {
             sr.querySelector(`[aria-label="合并第 ${left} 张与第 ${left + 1} 张切片"]`).click();
           }
         });
-        await waitForPreview(5, 90000);
+        await waitForSlicePreview(page, 5, 90000);
         assert.equal(await modal.sliceBadge.textContent(), '8 等分 · 合并后 5 张');
         assert.match(await modal.summary.textContent(), /5 张 PNG 切片（8 等分 · 合并后 5 张.*已等比缩小.*PNG 无损编码/);
         const wideSlices = await modal.cards.evaluateAll(async (cards) =>
@@ -5728,11 +5734,11 @@ async function runTests() {
         await entryBtn.click();
         modal = await getModalLocators(page);
         assert.equal(await modal.sourceBanner.isVisible(), true);
-        await waitForPreview(8);
+        await waitForSlicePreview(page, 8);
         await mergeBtn(modal, 1).click();
-        await waitForPreview(7);
+        await waitForSlicePreview(page, 7);
         await mergeBtn(modal, 6).click();
-        await waitForPreview(6);
+        await waitForSlicePreview(page, 6);
         assert.equal(await modal.sliceBadge.textContent(), '8 等分 · 合并后 6 张');
         await modal.submitBtn.click();
         await waitForComposerFeedback(
@@ -5769,19 +5775,19 @@ async function runTests() {
         modal = await getModalLocators(page);
         await modal.splitModeBtn('equal').click();
         await modal.fileInput.setInputFiles(patPath);
-        await waitForPreview(8);
+        await waitForSlicePreview(page, 8);
         assert.equal(await allMergeBtns(modal).count(), 0, '左右等分 must not offer merging');
         await modal.splitModeBtn('free').click();
         assert.equal(await allMergeBtns(modal).count(), 7);
         await mergeBtn(modal, 4).click();
-        await waitForPreview(7);
+        await waitForSlicePreview(page, 7);
         const staleDividersEnabled = await page.evaluate(() => {
           const sr = document.querySelector('#x-slicer-modal-host').shadowRoot;
           sr.querySelector('[data-action="split-mode"][data-split-mode="equal"]').click();
           return Array.from(sr.querySelectorAll('.slice-divider')).filter((d) => !d.disabled).length;
         });
         assert.equal(staleDividersEnabled, 0, 'Greyed 自由 preview must not offer merging after switching to 左右等分');
-        await waitForPreview(8);
+        await waitForSlicePreview(page, 8);
         assert.equal(await modal.sliceBadge.textContent(), '左右等分 1×8');
         assert.equal(await allMergeBtns(modal).count(), 0);
         reassembleAndVerifyPngSlices(await readPreviewPngs(modal), pat.rgba, pat.width, pat.height);
@@ -5800,7 +5806,7 @@ async function runTests() {
         modal = await getModalLocators(page);
         await modal.splitModeBtn('free').click();
         await modal.fileInput.setInputFiles(stripPath);
-        await waitForPreview(8);
+        await waitForSlicePreview(page, 8);
         await page.evaluate(() => {
           const sr = document.querySelector('#x-slicer-modal-host').shadowRoot;
           for (let left = 1; left <= 6; left++) {
@@ -5813,7 +5819,7 @@ async function runTests() {
         assert.equal(await modal.cards.count(), 0);
         assert.equal(await modal.sliceBadge.textContent(), '缩放后零尺寸');
         await modal.splitModeBtn('equal').click();
-        await waitForPreview(8);
+        await waitForSlicePreview(page, 8);
         assert.equal(await modal.sliceBadge.textContent(), '左右等分 1×8');
         assert.equal(await modal.sliceCountInput.getAttribute('aria-invalid'), 'false');
         await modal.closeBtn.click();
@@ -5825,7 +5831,7 @@ async function runTests() {
         modal = await getModalLocators(page);
         await modal.splitModeBtn('free').click();
         await modal.fileInput.setInputFiles(gonePath);
-        await waitForPreview(8);
+        await waitForSlicePreview(page, 8);
         fs.unlinkSync(gonePath);
         await mergeBtn(modal, 1).click();
         await page.waitForFunction(
@@ -5838,6 +5844,463 @@ async function runTests() {
         await modal.host.waitFor({ state: 'detached' });
       } finally {
         // 自由 is remembered in the shared profile: never leak it into later cases
+        await evaluateInExtensionWorld(page, `chrome.storage.local.clear()`);
+      }
+    });
+
+    // 27. Ticket #4: 拆回 along an original 分割线, 清除合并, and the merge lifecycle across N / mode / 原图 / reopen
+    await runCase('27_free_split_split_back_clear_merges_and_merge_lifecycle', async (page) => {
+      try {
+        const entryBtn = page.locator('#inline-composer button[data-x-slicer-entry="true"]');
+        const mergeBtn = (modal, left) => modal.host.getByRole('button', { name: `合并第 ${left} 张与第 ${left + 1} 张切片` });
+        const unmergeBtns = (modal) => modal.host.getByRole('button', { name: /^沿第 \d+ 条原有分割线拆回第 \d+ 张切片$/ });
+        const unmergeBtn = (modal, slice, nth) =>
+          modal.host.getByRole('button', { name: `沿第 ${nth} 条原有分割线拆回第 ${slice} 张切片` });
+        // 8 等分 of 197 px puts 分割线 1..7 at x = 24, 49, 73, 98, 123, 147, 172
+        const pat = createPatternPng(197, 80);
+        const patPath = writeTempFile(tmpDir, 'split-back-197x80.png', pat.buffer);
+        const verifyPreview = async (modal, widths) =>
+          reassembleAndVerifyPngSlices(await readPreviewPngs(modal), pat.rgba, pat.width, pat.height, widths);
+
+        // 27a. A merged card marks its inner original 分割线 with faint dashed lines; hover shows ＋ and a click
+        // splits the card back along that line (M + 1), re-slicing the whole group from the original
+        await entryBtn.click();
+        let modal = await getModalLocators(page);
+        await modal.splitModeBtn('free').click();
+        await modal.fileInput.setInputFiles(patPath);
+        await waitForSlicePreview(page, 8);
+        assert.equal(await unmergeBtns(modal).count(), 0, 'Unmerged slices have no inner 分割线');
+        await mergeBtn(modal, 3).click();
+        await waitForSlicePreview(page, 7);
+        await mergeBtn(modal, 3).click();
+        await waitForSlicePreview(page, 6);
+        assert.equal(await modal.sliceBadge.textContent(), '8 等分 · 合并后 6 张');
+        await verifyPreview(modal, [24, 25, 74, 24, 25, 25]);
+
+        // Slice 3 is 等分 regions 3..5 (x 49..123): inner lines at x 73 and 98, i.e. 24/74 and 49/74 of its width
+        assert.equal(await unmergeBtns(modal).count(), 2);
+        const geometry = await modal.cards.nth(2).evaluate((card) => {
+          const frame = card.querySelector('.slice-frame').getBoundingClientRect();
+          return Array.from(card.querySelectorAll('button[aria-label*="原有分割线拆回"]')).map((line) => {
+            const r = line.getBoundingClientRect();
+            return {
+              at: (r.left + r.width / 2 - frame.left) / frame.width,
+              lineStyle: getComputedStyle(line, '::before').borderLeftStyle,
+              plusOpacity: getComputedStyle(line.querySelector('[aria-hidden="true"]')).opacity,
+              plus: line.querySelector('[aria-hidden="true"]').textContent
+            };
+          });
+        });
+        assert.equal(geometry.length, 2);
+        [24 / 74, 49 / 74].forEach((expected, i) => {
+          assert.ok(Math.abs(geometry[i].at - expected) < 0.03, `Inner line ${i + 1} at ${geometry[i].at}, expected ${expected}`);
+          assert.equal(geometry[i].lineStyle, 'dashed');
+          assert.equal(geometry[i].plus, '＋');
+          assert.equal(geometry[i].plusOpacity, '0', '＋ hidden until hover');
+        });
+        await unmergeBtn(modal, 3, 2).hover();
+        await page.waitForFunction(
+          () =>
+            getComputedStyle(
+              document
+                .querySelector('#x-slicer-modal-host')
+                .shadowRoot.querySelector('[aria-label="沿第 2 条原有分割线拆回第 3 张切片"] [aria-hidden="true"]')
+            ).opacity === '1'
+        );
+
+        await unmergeBtn(modal, 3, 2).click();
+        await waitForSlicePreview(page, 7);
+        assert.equal(await modal.sliceBadge.textContent(), '8 等分 · 合并后 7 张');
+        await verifyPreview(modal, [24, 25, 49, 25, 24, 25, 25]);
+        assert.equal(await unmergeBtns(modal).count(), 1);
+        await unmergeBtn(modal, 3, 1).click();
+        await waitForSlicePreview(page, 8);
+        assert.equal(await modal.sliceBadge.textContent(), '8 等分 · 合并后 8 张');
+        assert.equal(await unmergeBtns(modal).count(), 0);
+        await verifyPreview(modal);
+
+        // Rapid 拆回 on the greyed preview: a line already split back is inert, and only the latest result can be filled
+        await mergeBtn(modal, 1).click();
+        await waitForSlicePreview(page, 7);
+        await mergeBtn(modal, 1).click();
+        await waitForSlicePreview(page, 6);
+        const duringSplit = await page.evaluate(() => {
+          const sr = document.querySelector('#x-slicer-modal-host').shadowRoot;
+          const first = sr.querySelector('[aria-label="沿第 1 条原有分割线拆回第 1 张切片"]');
+          first.click();
+          const snapshot = {
+            stripBusy: sr.querySelector('.preview-strip').getAttribute('aria-busy'),
+            submitDisabled: sr.querySelector('[data-action="submit"]').disabled,
+            badge: sr.querySelector('.slice-badge').textContent,
+            firstDisabled: first.disabled
+          };
+          first.click();
+          sr.querySelector('[aria-label="沿第 2 条原有分割线拆回第 1 张切片"]').click();
+          sr.querySelector('[data-action="submit"]').click();
+          return { ...snapshot, badgeAfter: sr.querySelector('.slice-badge').textContent };
+        });
+        assert.deepEqual(duringSplit, {
+          stripBusy: 'true',
+          submitDisabled: true,
+          badge: '8 等分 · 合并后 7 张',
+          firstDisabled: true,
+          badgeAfter: '8 等分 · 合并后 8 张'
+        });
+        await waitForSlicePreview(page, 8);
+        assert.equal((await page.evaluate(() => window.__mockX.getState())).submissions.length, 0);
+        await verifyPreview(modal);
+
+        // 27b. 清除合并 is disabled without merges, restores pure 8 等分 in one click, and is a 自由切分-only control
+        assert.equal(await modal.clearMergesBtn.isVisible(), true);
+        assert.equal(await modal.clearMergesBtn.isDisabled(), true, 'No merges: 清除合并 must be disabled');
+        await mergeBtn(modal, 2).click();
+        await waitForSlicePreview(page, 7);
+        await mergeBtn(modal, 5).click();
+        await waitForSlicePreview(page, 6);
+        assert.equal(await modal.clearMergesBtn.isEnabled(), true);
+        await modal.clearMergesBtn.click();
+        await waitForSlicePreview(page, 8);
+        assert.equal(await modal.sliceBadge.textContent(), '8 等分 · 合并后 8 张');
+        assert.equal(await unmergeBtns(modal).count(), 0);
+        await verifyPreview(modal);
+        assert.equal(await modal.clearMergesBtn.isDisabled(), true);
+        await modal.clearMergesBtn.dispatchEvent('click');
+        assert.equal(await modal.status.getAttribute('data-tone'), 'success', 'Disabled 清除合并 must not regenerate');
+        await modal.splitModeBtn('equal').click();
+        assert.equal(await modal.clearMergesBtn.isVisible(), false, '左右等分 has no merges to clear');
+        await modal.splitModeBtn('free').click();
+
+        // 清除合并 also recovers from a merge that failed: 32000×3 merged down to 2 slices cannot scale (0 px high)
+        const stripPath = writeTempFile(tmpDir, 'clear-strip-32000x3.png', createSolidPng(32000, 3, [30, 140, 200, 255]));
+        await modal.fileInput.setInputFiles(stripPath);
+        await waitForSlicePreview(page, 8);
+        await page.evaluate(() => {
+          const sr = document.querySelector('#x-slicer-modal-host').shadowRoot;
+          for (let left = 1; left <= 6; left++) {
+            sr.querySelector(`[aria-label="合并第 ${left} 张与第 ${left + 1} 张切片"]`).click();
+          }
+        });
+        await page.waitForFunction(
+          () => document.querySelector('#x-slicer-modal-host').shadowRoot.querySelector('.status').getAttribute('data-tone') === 'error'
+        );
+        assert.equal(await modal.sliceBadge.textContent(), '缩放后零尺寸');
+        assert.equal(await modal.clearMergesBtn.isEnabled(), true);
+        await modal.clearMergesBtn.click();
+        await waitForSlicePreview(page, 8);
+        assert.equal(await modal.sliceBadge.textContent(), '8 等分 · 合并后 8 张');
+        assert.equal(await modal.sliceCountInput.getAttribute('aria-invalid'), 'false');
+
+        // 27c. Changing 等分张数 N by preset, stepper or typing drops every merge and re-slices pure N, with no confirm
+        const dialogs = [];
+        page.on('dialog', (d) => {
+          dialogs.push(d.message());
+          d.dismiss().catch(() => {});
+        });
+        await modal.fileInput.setInputFiles(patPath);
+        await waitForSlicePreview(page, 8);
+        const mergeTwice = async (n) => {
+          await mergeBtn(modal, 1).click();
+          await waitForSlicePreview(page, n - 1);
+          await mergeBtn(modal, 1).click();
+          await waitForSlicePreview(page, n - 2);
+          assert.equal(await modal.sliceBadge.textContent(), `${n} 等分 · 合并后 ${n - 2} 张`);
+        };
+        const expectPureN = async (n) => {
+          await waitForSlicePreview(page, n);
+          assert.equal(await modal.sliceBadge.textContent(), `${n} 等分 · 合并后 ${n} 张`);
+          assert.equal(await unmergeBtns(modal).count(), 0);
+          assert.equal(await modal.clearMergesBtn.isDisabled(), true);
+          await verifyPreview(modal);
+        };
+        await mergeTwice(8);
+        await modal.presetBtn(5).click();
+        await expectPureN(5);
+        await mergeTwice(5);
+        await modal.increaseBtn.click();
+        await expectPureN(6);
+        await mergeTwice(6);
+        await modal.decreaseBtn.click();
+        await expectPureN(5);
+        await mergeTwice(5);
+        await modal.sliceCountInput.fill('7');
+        await expectPureN(7);
+        await mergeTwice(7);
+        await modal.sliceCountInput.focus();
+        await page.keyboard.press('ArrowUp');
+        await expectPureN(8);
+        await mergeTwice(8);
+        await modal.presetBtn(20).click();
+        await expectPureN(20);
+        // Going back to the old N does not bring the old merges back either
+        await modal.presetBtn(8).click();
+        await expectPureN(8);
+        assert.deepEqual(dialogs, [], 'Changing N must not ask for confirmation');
+
+        // 27d. 自由 → 等分 → 自由 with the same window, 原图 and N: 等分 outputs pure N, 自由 restores the merges
+        await mergeBtn(modal, 3).click();
+        await waitForSlicePreview(page, 7);
+        await mergeBtn(modal, 3).click();
+        await waitForSlicePreview(page, 6);
+        await mergeBtn(modal, 5).click();
+        await waitForSlicePreview(page, 5);
+        await verifyPreview(modal, [24, 25, 74, 24, 50]);
+        await modal.splitModeBtn('equal').click();
+        await waitForSlicePreview(page, 8);
+        assert.equal(await modal.sliceBadge.textContent(), '左右等分 1×8');
+        assert.equal(await unmergeBtns(modal).count(), 0);
+        await verifyPreview(modal);
+        await modal.splitModeBtn('free').click();
+        await waitForSlicePreview(page, 5);
+        assert.equal(await modal.sliceBadge.textContent(), '8 等分 · 合并后 5 张');
+        await verifyPreview(modal, [24, 25, 74, 24, 50]);
+        assert.equal(await unmergeBtns(modal).count(), 3);
+        assert.equal(await modal.clearMergesBtn.isEnabled(), true);
+        // A restored merge still splits back
+        await unmergeBtn(modal, 5, 1).click();
+        await waitForSlicePreview(page, 6);
+        await verifyPreview(modal, [24, 25, 74, 24, 25, 25]);
+
+        // Changing N while in 等分 still drops the kept merges
+        await modal.splitModeBtn('equal').click();
+        await waitForSlicePreview(page, 8);
+        await modal.presetBtn(5).click();
+        await waitForSlicePreview(page, 5);
+        await modal.presetBtn(8).click();
+        await waitForSlicePreview(page, 8);
+        await modal.splitModeBtn('free').click();
+        await expectPureN(8);
+
+        // 27e. A new 原图 drops the merges, in 自由 and while they are parked in 等分
+        const pat2 = createPatternPng(161, 40);
+        const pat2Path = writeTempFile(tmpDir, 'split-back-other-161x40.png', pat2.buffer);
+        await mergeTwice(8);
+        await modal.fileInput.setInputFiles(pat2Path);
+        await waitForSlicePreview(page, 8);
+        assert.equal(await modal.sliceBadge.textContent(), '8 等分 · 合并后 8 张');
+        assert.equal(await unmergeBtns(modal).count(), 0);
+        assert.equal(await modal.clearMergesBtn.isDisabled(), true);
+        reassembleAndVerifyPngSlices(await readPreviewPngs(modal), pat2.rgba, pat2.width, pat2.height);
+        await modal.fileInput.setInputFiles(patPath);
+        await waitForSlicePreview(page, 8);
+        await mergeTwice(8);
+        await modal.splitModeBtn('equal').click();
+        await waitForSlicePreview(page, 8);
+        await modal.fileInput.setInputFiles(pat2Path);
+        await waitForSlicePreview(page, 8);
+        await modal.splitModeBtn('free').click();
+        await waitForSlicePreview(page, 8);
+        assert.equal(await modal.sliceBadge.textContent(), '8 等分 · 合并后 8 张');
+        assert.equal(await modal.clearMergesBtn.isDisabled(), true);
+
+        // Closing the window drops them too: reopen (自由 is remembered) and pick the same 原图 again
+        await modal.fileInput.setInputFiles(patPath);
+        await waitForSlicePreview(page, 8);
+        await mergeTwice(8);
+        await modal.closeBtn.click();
+        await modal.host.waitFor({ state: 'detached' });
+        await entryBtn.click();
+        modal = await getModalLocators(page);
+        assert.equal(await modal.splitModeBtn('free').getAttribute('aria-pressed'), 'true');
+        assert.equal(await modal.sliceBadge.textContent(), '8 等分 · 合并后 8 张');
+        assert.equal(await modal.clearMergesBtn.isDisabled(), true);
+        await modal.fileInput.setInputFiles(patPath);
+        await expectPureN(8);
+        // Nothing about merges is persisted: the extension keeps only the split mode, the X page nothing
+        assert.deepEqual(await evaluateInExtensionWorld(page, `chrome.storage.local.get(null)`), { splitMode: 'free' });
+        assert.deepEqual(await auditPageStorage(page), { localLen: 0, sessionLen: 0, dbCount: 0 });
+        await modal.closeBtn.click();
+        await modal.host.waitFor({ state: 'detached' });
+
+        // 27f. 框内切图: merge, 拆回 and 清除合并 work on the composer image, and the fill uses the final M
+        const pat240 = createPatternPng(240, 80);
+        await page.evaluate((bytes) => {
+          window.__mockX.setComposerText('inline', '拆回后填入保留文案');
+          window.__mockX.configureUserSingleUpload('inline', { removeAriaLabel: 'Remove media' });
+          window.__mockX.triggerDropFileBytes('inline', bytes, 'split-back-240x80.png', 'image/png');
+        }, Array.from(pat240.buffer));
+        await page.waitForSelector('#inline-composer [data-testid="attachmentItem"] img');
+        await entryBtn.click();
+        modal = await getModalLocators(page);
+        assert.equal(await modal.sourceBanner.isVisible(), true);
+        await waitForSlicePreview(page, 8);
+        await mergeTwice(8);
+        await modal.clearMergesBtn.click();
+        await waitForSlicePreview(page, 8);
+        await mergeBtn(modal, 2).click();
+        await waitForSlicePreview(page, 7);
+        await mergeBtn(modal, 2).click();
+        await waitForSlicePreview(page, 6);
+        await unmergeBtn(modal, 2, 1).click();
+        await waitForSlicePreview(page, 7);
+        assert.equal(await modal.sliceBadge.textContent(), '8 等分 · 合并后 7 张');
+        await modal.submitBtn.click();
+        await waitForComposerFeedback(page, '#inline-composer', 'success', /已填入 7 张切片（已替换原附件），等待发布（已保留原有文案）/);
+        const st27f = await page.evaluate(() => window.__mockX.getState());
+        assert.equal(st27f.submissions.length, 1);
+        assert.equal(st27f.submissions[0].count, 7);
+        assert.equal(await page.locator('#inline-composer [data-testid="attachmentItem"]').count(), 7);
+        assert.equal(await page.locator('#inline-composer [data-testid="tweetTextarea_0"]').textContent(), '拆回后填入保留文案');
+        reassembleAndVerifyPngSlices(
+          st27f.submissions[0].files.map((f) => Buffer.from(f.bytes)),
+          pat240.rgba,
+          pat240.width,
+          pat240.height,
+          [30, 30, 60, 30, 30, 30, 30]
+        );
+
+        // 27g. QA regressions: 拆回 lines stay on the real 分割线 and hit the right one when packed tight,
+        // ＋ is never clipped, same-N clicks never drop merges, and badges follow the mode in every state
+        await page.evaluate(() => {
+          document.querySelector('#inline-composer [data-testid="attachments"]').innerHTML = '';
+          document.querySelector('#inline-composer [data-x-slicer-feedback="true"]')?.remove();
+          window.__mockX.clearSubmissions();
+          window.__mockX.setComposerText('inline', '');
+        });
+        // Where 分割线 at `fraction` of a card's width is drawn: measured on the image as rendered (object-fit: contain)
+        const lineTarget = (card, fraction) =>
+          card.evaluate((c, f) => {
+            const img = c.querySelector('img');
+            const r = img.getBoundingClientRect();
+            const ratio = img.naturalWidth / img.naturalHeight;
+            const w = Math.min(r.width, r.height * ratio);
+            return { x: r.left + (r.width - w) / 2 + f * w, y: r.top + r.height / 2 };
+          }, fraction);
+
+        // Square 800×800 at N = 20: merging 等分 1..4 packs 3 inner lines ~7.5 px apart in a 30 px card
+        const sq = createPatternPng(800, 800);
+        const sqPath = writeTempFile(tmpDir, 'split-back-square-800.png', sq.buffer);
+        await entryBtn.click();
+        modal = await getModalLocators(page);
+        await modal.presetBtn(20).click();
+        await modal.fileInput.setInputFiles(sqPath);
+        await waitForSlicePreview(page, 20);
+        for (let m = 1; m <= 3; m++) {
+          await mergeBtn(modal, 1).click();
+          await waitForSlicePreview(page, 20 - m);
+        }
+        const rest = Array(16).fill(40);
+        reassembleAndVerifyPngSlices(await readPreviewPngs(modal), sq.rgba, 800, 800, [160, ...rest]);
+        let target = await lineTarget(modal.cards.nth(0), 1 / 4);
+        await page.mouse.click(target.x, target.y);
+        await waitForSlicePreview(page, 18);
+        reassembleAndVerifyPngSlices(await readPreviewPngs(modal), sq.rgba, 800, 800, [40, 120, ...rest]);
+        target = await lineTarget(modal.cards.nth(1), 2 / 3);
+        await page.mouse.click(target.x, target.y);
+        await waitForSlicePreview(page, 19);
+        reassembleAndVerifyPngSlices(await readPreviewPngs(modal), sq.rgba, 800, 800, [40, 80, 40, ...rest]);
+
+        // Panorama 3200×100 at N = 8, 等分 1..6 merged: the preview frames are only ~9 px high
+        const pano = createPatternPng(3200, 100);
+        const panoPath = writeTempFile(tmpDir, 'split-back-pano-3200x100.png', pano.buffer);
+        await modal.presetBtn(8).click();
+        await modal.fileInput.setInputFiles(panoPath);
+        await waitForSlicePreview(page, 8);
+        for (let m = 1; m <= 5; m++) {
+          await mergeBtn(modal, 1).click();
+          await waitForSlicePreview(page, 8 - m);
+        }
+        for (let nth = 1; nth <= 5; nth++) {
+          const expected = await lineTarget(modal.cards.nth(0), nth / 6);
+          const box = await unmergeBtn(modal, 1, nth).boundingBox();
+          assert.ok(
+            Math.abs(box.x + box.width / 2 - expected.x) < 1.5,
+            `Inner line ${nth} drawn at ${box.x + box.width / 2}, 分割线 is at ${expected.x}`
+          );
+        }
+        await unmergeBtn(modal, 1, 3).hover();
+        const markBox = await unmergeBtn(modal, 1, 3).locator('[aria-hidden="true"]').boundingBox();
+        assert.equal(Math.round(markBox.width), 18, '＋ must not be squished');
+        assert.equal(Math.round(markBox.height), 18);
+        const markShot = PNG.sync.read(
+          await page.screenshot({ clip: { x: markBox.x, y: markBox.y, width: 18, height: 18 } })
+        );
+        const deviceScale = markShot.width / 18;
+        for (const [px, py] of [[5, 3], [13, 15]]) {
+          const i = (Math.floor(py * deviceScale) * markShot.width + Math.floor(px * deviceScale)) * 4;
+          const [r, g, b] = markShot.data.subarray(i, i + 3);
+          assert.ok(b > 200 && r < 100 && g > 120 && g < 190, `＋ badge clipped at (${px}, ${py}): rgb(${r}, ${g}, ${b})`);
+        }
+        await modal.closeBtn.click();
+        await modal.host.waitFor({ state: 'detached' });
+
+        // Re-applying the current N (preset or ArrowUp at the limit) while a regeneration is in flight keeps the merges,
+        // both in 自由 and while they are parked in 等分
+        await entryBtn.click();
+        modal = await getModalLocators(page);
+        await modal.fileInput.setInputFiles(patPath);
+        await waitForSlicePreview(page, 8);
+        await mergeBtn(modal, 1).click();
+        await waitForSlicePreview(page, 7);
+        await page.evaluate(() => {
+          const sr = document.querySelector('#x-slicer-modal-host').shadowRoot;
+          sr.querySelector('[aria-label="合并第 1 张与第 2 张切片"]').click();
+          sr.querySelector('[data-action="preset-count"][data-count="8"]').click();
+        });
+        await waitForSlicePreview(page, 6);
+        assert.equal(await modal.sliceBadge.textContent(), '8 等分 · 合并后 6 张');
+        await verifyPreview(modal, [73, 25, 25, 24, 25, 25]);
+        await page.evaluate(() => {
+          const sr = document.querySelector('#x-slicer-modal-host').shadowRoot;
+          sr.querySelector('[data-action="split-mode"][data-split-mode="equal"]').click();
+          sr.querySelector('[data-action="preset-count"][data-count="8"]').click();
+        });
+        await waitForSlicePreview(page, 8);
+        await modal.splitModeBtn('free').click();
+        await waitForSlicePreview(page, 6);
+        assert.equal(await modal.sliceBadge.textContent(), '8 等分 · 合并后 6 张');
+        await modal.presetBtn(20).click();
+        await waitForSlicePreview(page, 20);
+        await mergeBtn(modal, 1).click();
+        await waitForSlicePreview(page, 19);
+        await page.evaluate(() => {
+          const sr = document.querySelector('#x-slicer-modal-host').shadowRoot;
+          sr.querySelector('[aria-label="合并第 1 张与第 2 张切片"]').click();
+          sr.querySelector('#xslicer-slice-count').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+        });
+        await waitForSlicePreview(page, 18);
+        assert.equal(await modal.sliceBadge.textContent(), '20 等分 · 合并后 18 张');
+
+        // 清除合并 after a failed merge drops the error marking at once, so 等分 shows its own badge while regenerating
+        await modal.presetBtn(8).click();
+        await modal.fileInput.setInputFiles(stripPath);
+        await waitForSlicePreview(page, 8);
+        await page.evaluate(() => {
+          const sr = document.querySelector('#x-slicer-modal-host').shadowRoot;
+          for (let left = 1; left <= 6; left++) {
+            sr.querySelector(`[aria-label="合并第 ${left} 张与第 ${left + 1} 张切片"]`).click();
+          }
+        });
+        await page.waitForFunction(
+          () => document.querySelector('#x-slicer-modal-host').shadowRoot.querySelector('.status').getAttribute('data-tone') === 'error'
+        );
+        const afterClear = await page.evaluate(() => {
+          const sr = document.querySelector('#x-slicer-modal-host').shadowRoot;
+          sr.querySelector('[data-action="clear-merges"]').click();
+          sr.querySelector('[data-action="split-mode"][data-split-mode="equal"]').click();
+          return {
+            badge: sr.querySelector('.slice-badge').textContent,
+            invalid: sr.querySelector('#xslicer-slice-count').getAttribute('aria-invalid')
+          };
+        });
+        assert.deepEqual(afterClear, { badge: '左右等分 1×8', invalid: 'false' });
+        await waitForSlicePreview(page, 8);
+        await modal.splitModeBtn('free').click();
+        await modal.closeBtn.click();
+        await modal.host.waitFor({ state: 'detached' });
+
+        // A window that opens blocked (existing poll) still shows the remembered 自由 badge and its 清除合并
+        await page.evaluate(() => window.__mockX.addPoll('inline'));
+        await entryBtn.click();
+        modal = await getModalLocators(page);
+        assert.equal(await modal.status.getAttribute('data-tone'), 'error');
+        assert.equal(await modal.splitModeBtn('free').getAttribute('aria-pressed'), 'true');
+        assert.equal(await modal.sliceBadge.textContent(), '8 等分 · 合并后 8 张');
+        assert.equal(await modal.clearMergesBtn.isVisible(), true);
+        assert.equal(await modal.clearMergesBtn.isDisabled(), true);
+        await modal.closeBtn.click();
+        await modal.host.waitFor({ state: 'detached' });
+        await page.evaluate(() => document.querySelector('#inline-composer [data-testid="pollOptions"]')?.remove());
+      } finally {
         await evaluateInExtensionWorld(page, `chrome.storage.local.clear()`);
       }
     });

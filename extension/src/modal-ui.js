@@ -71,7 +71,8 @@
     .count-input:focus-visible,
     .stepper-btn:focus-visible,
     .preset-btn:focus-visible,
-    .mode-btn:focus-visible {
+    .mode-btn:focus-visible,
+    .clear-merges-btn:focus-visible {
       outline: 2px solid #1d9bf0;
       outline-offset: 2px;
     }
@@ -117,6 +118,34 @@
       display: flex;
       flex-direction: column;
       gap: 6px;
+    }
+    .mode-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .clear-merges-btn {
+      appearance: none;
+      height: 26px;
+      padding: 0 12px;
+      border-radius: 9999px;
+      border: 1px solid #cfd9de;
+      background: #ffffff;
+      color: #0f1419;
+      font-size: 12px;
+      font-weight: 600;
+      line-height: 1;
+      cursor: pointer;
+    }
+    .clear-merges-btn[hidden] {
+      display: none;
+    }
+    .clear-merges-btn:hover:not(:disabled) {
+      background: #eff3f4;
+    }
+    .clear-merges-btn:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
     }
     .mode-switch {
       display: inline-flex;
@@ -304,6 +333,8 @@
       line-height: 1.5;
     }
     .preview-strip {
+      /* Never squeeze the cards: a shrunk strip clips their tops (and the 拆回 lines); let .body scroll instead */
+      flex: 0 0 auto;
       display: flex;
       align-items: flex-end;
       gap: 10px;
@@ -357,13 +388,16 @@
     .slice-divider:disabled::before {
       border-left-color: #cfd9de;
     }
-    .slice-divider:focus-visible {
+    .slice-divider:focus-visible,
+    .merged-divider:focus-visible {
       outline: 2px solid #1d9bf0;
       outline-offset: -2px;
       border-radius: 6px;
     }
-    .divider-mark {
+    .divider-mark,
+    .unmerge-mark {
       position: relative;
+      flex: 0 0 auto;
       width: 18px;
       height: 18px;
       border-radius: 9999px;
@@ -376,9 +410,53 @@
       align-items: center;
       justify-content: center;
       opacity: 0;
+      pointer-events: none;
     }
     .slice-divider:hover:not(:disabled) .divider-mark,
     .slice-divider:focus-visible .divider-mark {
+      opacity: 1;
+    }
+    /* 拆回 hit box: left and width are set per line so neighbouring lines never overlap */
+    .merged-divider {
+      appearance: none;
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      margin: 0;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .merged-divider::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      left: 50%;
+      border-left: 1px dashed rgba(255, 255, 255, 0.85);
+      filter: drop-shadow(0 0 1px rgba(15, 20, 25, 0.45));
+    }
+    .merged-divider:hover:not(:disabled),
+    .merged-divider:focus-visible {
+      z-index: 1;
+    }
+    .merged-divider:hover:not(:disabled)::before,
+    .merged-divider:focus-visible::before {
+      border-left: 2px solid #1d9bf0;
+      filter: none;
+    }
+    .merged-divider:disabled {
+      cursor: not-allowed;
+    }
+    .unmerge-mark {
+      background: #1d9bf0;
+    }
+    .merged-divider:hover:not(:disabled) .unmerge-mark,
+    .merged-divider:focus-visible .unmerge-mark {
       opacity: 1;
     }
     .slice-card {
@@ -392,14 +470,16 @@
       border-radius: 8px;
       padding: 8px;
     }
+    /* content-box: the inline width × height is exactly the image box, so 拆回 lines land on the real 分割线 */
     .slice-frame {
+      position: relative;
+      box-sizing: content-box;
       height: 150px;
       display: flex;
       align-items: center;
       justify-content: center;
       background: repeating-conic-gradient(#eef1f4 0% 25%, #ffffff 0% 50%) 50% / 12px 12px;
       border: 1px solid #e1e8ed;
-      overflow: hidden;
     }
     .slice-img {
       display: block;
@@ -486,6 +566,7 @@
       DEFAULT_SLICE_COUNT,
       parseSliceCountInput,
       formatBytes,
+      equalSplitX,
       sliceImageFile
     } = imageProcessor;
     const isReplaceMode = mode === 'replace-existing' && Boolean(inComposerSource?.sourceFile);
@@ -521,23 +602,26 @@
             </div>
             <div class="mode-group">
               <span class="mode-label" id="xslicer-mode-label">切分模式</span>
-              <div class="mode-switch" role="group" aria-labelledby="xslicer-mode-label">
-                <button
-                  type="button"
-                  class="mode-btn"
-                  data-action="split-mode"
-                  data-split-mode="equal"
-                  aria-pressed="true"
-                  aria-label="左右等分"
-                >等分</button>
-                <button
-                  type="button"
-                  class="mode-btn"
-                  data-action="split-mode"
-                  data-split-mode="free"
-                  aria-pressed="false"
-                  aria-label="自由切分"
-                >自由</button>
+              <div class="mode-row">
+                <div class="mode-switch" role="group" aria-labelledby="xslicer-mode-label">
+                  <button
+                    type="button"
+                    class="mode-btn"
+                    data-action="split-mode"
+                    data-split-mode="equal"
+                    aria-pressed="true"
+                    aria-label="左右等分"
+                  >等分</button>
+                  <button
+                    type="button"
+                    class="mode-btn"
+                    data-action="split-mode"
+                    data-split-mode="free"
+                    aria-pressed="false"
+                    aria-label="自由切分"
+                  >自由</button>
+                </div>
+                <button type="button" class="clear-merges-btn" data-action="clear-merges" hidden disabled>清除合并</button>
               </div>
             </div>
             <div class="count-group">
@@ -602,7 +686,7 @@
             </div>
           </div>
           <p class="hint">
-            支持单张静态位图（PNG / JPEG / WebP / BMP / 静态 GIF / 静态 AVIF，原图总像素 ≤ 500,000,000，支持 4 亿像素高解析大图）。每次打开默认 8 张（推荐 5 / 8 / 20 张，可调整为 2～20 的整数）；修改张数将从原图重新切分；自由切分下点击相邻切片之间分割线上的 × 可合并两侧切片（至少保留 2 张），每次合并都从原图重新生成整组切片。大图将自动按整组统一比例缩小并优化至每片长边 ≤ 4096 px、体积 ≤ 4.5 MB（透明图保留 PNG 透明背景），处理期间可随时取消或关闭。
+            支持单张静态位图（PNG / JPEG / WebP / BMP / 静态 GIF / 静态 AVIF，原图总像素 ≤ 500,000,000，支持 4 亿像素高解析大图）。每次打开默认 8 张（推荐 5 / 8 / 20 张，可调整为 2～20 的整数）；修改张数将清空合并并从原图重新切分；自由切分下点击相邻切片之间分割线上的 × 可合并两侧切片（至少保留 2 张），点击合并后切片内虚线上的 ＋ 可沿原有分割线拆回，「清除合并」可一键恢复纯等分，每次合并或拆回都从原图重新生成整组切片。大图将自动按整组统一比例缩小并优化至每片长边 ≤ 4096 px、体积 ≤ 4.5 MB（透明图保留 PNG 透明背景），处理期间可随时取消或关闭。
           </p>
           <div class="status" role="status" aria-live="polite" data-tone="neutral"></div>
           <div class="summary" hidden></div>
@@ -632,6 +716,7 @@
     const increaseBtn = shadow.querySelector('[data-action="increase-count"]');
     const presetBtns = Array.from(shadow.querySelectorAll('[data-action="preset-count"]'));
     const modeBtns = Array.from(shadow.querySelectorAll('[data-action="split-mode"]'));
+    const clearMergesBtn = shadow.querySelector('[data-action="clear-merges"]');
     const sliceBadge = shadow.querySelector('.slice-badge');
     const statusEl = shadow.querySelector('.status');
     const summaryEl = shadow.querySelector('.summary');
@@ -842,26 +927,33 @@
         : `正在本地解码并从原图左右等分为 ${plan.sliceCount} 张切片（可随时取消）...`;
     }
 
-    function getDividerButtons() {
-      return Array.from(previewStrip.querySelectorAll('.slice-divider'));
-    }
-
-    function renderDividerStates() {
-      const plan = currentPlan();
-      const atMinimum = !plan || plan.outputCount <= MIN_SLICE_COUNT;
-      // Dividers left on a stale 自由 preview after switching to 左右等分 must not look mergeable
-      const locked = areSliceControlsLocked() || splitMode !== 'free';
-      const dividers = getDividerButtons();
-      const nextDisabled = dividers.map(
-        (btn) => locked || atMinimum || mergedDividers.has(Number(btn.getAttribute('data-divider')))
-      );
-      if (dividers.some((btn, i) => nextDisabled[i] && shadow.activeElement === btn)) {
+    // Disable a control without stranding keyboard focus on it
+    function setDisabledKeepingFocus(el, disabled) {
+      if (disabled && shadow.activeElement === el) {
         dialogEl.focus();
       }
-      dividers.forEach((btn, i) => {
-        btn.disabled = nextDisabled[i];
+      el.disabled = disabled;
+    }
+
+    // Merge / 拆回 / 清除合并 controls follow the merges, the split mode and the slice-control lock
+    function renderMergeControls() {
+      const plan = currentPlan();
+      const atMinimum = !plan || plan.outputCount <= MIN_SLICE_COUNT;
+      // Controls left on a stale 自由 preview after switching to 左右等分 must not stay usable
+      const locked = areSliceControlsLocked() || splitMode !== 'free';
+      for (const btn of previewStrip.querySelectorAll('.slice-divider')) {
+        setDisabledKeepingFocus(
+          btn,
+          locked || atMinimum || mergedDividers.has(Number(btn.getAttribute('data-divider')))
+        );
         btn.title = atMinimum ? `至少保留 ${MIN_SLICE_COUNT} 张切片，无法继续合并` : '合并相邻两张切片';
-      });
+      }
+      // A line already split back while the preview regenerates has nothing left to undo
+      for (const line of previewStrip.querySelectorAll('.merged-divider')) {
+        setDisabledKeepingFocus(line, locked || !mergedDividers.has(Number(line.getAttribute('data-divider'))));
+      }
+      clearMergesBtn.hidden = splitMode !== 'free';
+      setDisabledKeepingFocus(clearMergesBtn, locked || mergedDividers.size === 0);
     }
 
     // Keep the old cards visible but greyed and unsubmittable until the latest generation lands
@@ -877,6 +969,12 @@
       }
     }
 
+    // Merges changed: relabel (dropping any earlier error marking) and re-slice the whole group from the original
+    function applyMergeChange(sliceCount) {
+      updateSliceCountVisuals({ ok: true, value: sliceCount });
+      regenerateFromOriginal();
+    }
+
     function regenerateFromOriginal() {
       const plan = currentPlan();
       if (!plan) return;
@@ -884,7 +982,6 @@
       abortActiveTask();
       const token = ++activeTaskToken;
       markPreviewStale();
-      renderDividerStates();
       scheduleSliceGeneration(currentFile, plan, token);
     }
 
@@ -895,8 +992,23 @@
       if (mergedDividers.has(divider) || plan.outputCount <= MIN_SLICE_COUNT) return;
       if (!checkPreviewTargetIntegrity()) return;
       mergedDividers.add(divider);
-      sliceBadge.textContent = formatSliceBadge(plan.sliceCount);
-      regenerateFromOriginal();
+      applyMergeChange(plan.sliceCount);
+    }
+
+    // 拆回: restore merged 分割线 k, so its merged slice splits back into two
+    function unmergeDivider(divider) {
+      if (areSliceControlsLocked() || splitMode !== 'free' || !mergedDividers.has(divider)) return;
+      if (!checkPreviewTargetIntegrity()) return;
+      mergedDividers.delete(divider);
+      applyMergeChange(currentPlan().sliceCount);
+    }
+
+    // 清除合并: back to the pure 等分 of the current N (also the way out of a merge that failed to generate)
+    function clearMerges() {
+      if (areSliceControlsLocked() || splitMode !== 'free' || mergedDividers.size === 0) return;
+      if (!checkPreviewTargetIntegrity()) return;
+      mergedDividers.clear();
+      applyMergeChange(currentPlan().sliceCount);
     }
 
     function renderSplitMode() {
@@ -923,6 +1035,7 @@
       splitMode = nextMode;
       preferences.saveSplitMode(nextMode);
       renderSplitMode();
+      renderMergeControls();
       // Only relabel a valid count; keep error badges (e.g. 超出原图宽度) and aria-invalid untouched
       const countCheck = parseSliceCountInput(sliceCountInput.value);
       if (countCheck.ok && sliceCountInput.getAttribute('aria-invalid') !== 'true') {
@@ -979,6 +1092,7 @@
       for (const btn of modeBtns) {
         btn.disabled = locked;
       }
+      renderMergeControls();
     }
 
     function renderPreview(result) {
@@ -1040,6 +1154,35 @@
         img.alt = `${slice.fileName} (${slice.width}×${slice.height})`;
         frame.appendChild(img);
 
+        // A merged slice spans 等分 regions start..end; mark each original 分割线 inside it for 拆回
+        if (splitMode === 'free') {
+          const start = i === 0 ? 0 : keptDividers[i - 1];
+          const end = i < keptDividers.length ? keptDividers[i] : result.sliceCount;
+          const startX = equalSplitX(result.sourceWidth, result.sliceCount, start);
+          const spanW = equalSplitX(result.sourceWidth, result.sliceCount, end) - startX;
+          const lines = [];
+          for (let k = start + 1; k < end; k++) {
+            lines.push({ k, x: (frameWidth * (equalSplitX(result.sourceWidth, result.sliceCount, k) - startX)) / spanW });
+          }
+          lines.forEach(({ k, x }, j) => {
+            // Up to 16 px wide, but never past the frame or halfway to a neighbouring line
+            const leftRoom = j === 0 ? x : (x - lines[j - 1].x) / 2;
+            const rightRoom = j === lines.length - 1 ? frameWidth - x : (lines[j + 1].x - x) / 2;
+            const half = Math.min(8, leftRoom, rightRoom);
+            const line = document.createElement('button');
+            line.type = 'button';
+            line.className = 'merged-divider';
+            line.setAttribute('data-divider', String(k));
+            line.setAttribute('aria-label', `沿第 ${j + 1} 条原有分割线拆回第 ${i + 1} 张切片`);
+            line.title = '沿原有分割线拆回两张切片';
+            line.style.left = `${x - half}px`;
+            line.style.width = `${2 * half}px`;
+            line.innerHTML = '<span class="unmerge-mark" aria-hidden="true">＋</span>';
+            line.addEventListener('click', () => unmergeDivider(k));
+            frame.appendChild(line);
+          });
+        }
+
         const meta = document.createElement('div');
         meta.className = 'slice-meta';
         meta.innerHTML = `
@@ -1064,7 +1207,7 @@
       });
 
       previewStrip.hidden = false;
-      renderDividerStates();
+      renderMergeControls();
     }
 
     async function runSliceGeneration(file, plan, token) {
@@ -1231,14 +1374,17 @@
       if (isClosed || isSubmitting || submissionFinished || initialError || targetInvalidated) return;
       if (!checkPreviewTargetIntegrity()) return;
 
+      const previousCount = parseSliceCountInput(lastProcessedCountRaw);
       lastProcessedCountRaw = sliceCountInput.value;
       pendingGeneration = null;
       abortActiveTask();
       const token = ++activeTaskToken;
-      mergedDividers.clear();
-      clearPreview();
-
       const countCheck = parseSliceCountInput(sliceCountInput.value);
+      // Merges belong to one 等分张数 N: a new N drops them, re-applying the same N (e.g. its preset) keeps them
+      if (!countCheck.ok || countCheck.value !== previousCount.value) {
+        mergedDividers.clear();
+      }
+      clearPreview();
       updateSliceCountVisuals(countCheck);
 
       if (!countCheck.ok) {
@@ -1363,7 +1509,7 @@
       for (const btn of [...presetBtns, ...modeBtns]) {
         btn.disabled = true;
       }
-      renderDividerStates();
+      renderMergeControls();
       submitBtn.disabled = true;
       submitBtn.setAttribute('aria-busy', 'true');
       cancelBtn.disabled = true;
@@ -1389,7 +1535,6 @@
         fileInput.disabled = false;
         sliceCountInput.disabled = false;
         updateSliceCountVisuals(countCheck);
-        renderDividerStates();
         submitBtn.disabled = false;
         setStatus('error', preValidation.message);
         submitBtn.focus();
@@ -1767,6 +1912,7 @@
     for (const btn of modeBtns) {
       btn.addEventListener('click', () => setSplitMode(btn.getAttribute('data-split-mode')));
     }
+    clearMergesBtn.addEventListener('click', clearMerges);
     downloadRetainedBtn.addEventListener('click', handleDownloadRetainedSource);
     closeBtn.addEventListener('click', close);
     cancelBtn.addEventListener('click', close);
@@ -1785,12 +1931,7 @@
     if (initialError) {
       fileInput.disabled = true;
       sliceCountInput.disabled = true;
-      decreaseBtn.disabled = true;
-      increaseBtn.disabled = true;
-      for (const btn of [...presetBtns, ...modeBtns]) {
-        btn.disabled = true;
-      }
-      submitBtn.disabled = true;
+      updateSliceCountVisuals({ ok: true, value: DEFAULT_SLICE_COUNT });
       cancelBtn.textContent = '关闭';
       setStatus('error', initialError);
       cancelBtn.focus();
