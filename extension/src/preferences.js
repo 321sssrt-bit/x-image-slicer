@@ -24,7 +24,6 @@
   }
 
   async function saveSplitMode(mode) {
-    if (!isSplitMode(mode)) return;
     try {
       await chrome.storage.local.set({ [SPLIT_MODE_KEY]: mode });
     } catch {
@@ -33,7 +32,6 @@
   }
 
   XSlicer.preferences = {
-    DEFAULT_SPLIT_MODE,
     isSplitMode,
     loadSplitMode,
     saveSplitMode

@@ -764,7 +764,7 @@
   }
 
   // Each region is the union of adjacent 等分 regions between two kept 分割线, so the group still covers the full width
-  function computeSliceRegions(width, height, sliceCount, mergedDividers = []) {
+  function computeSliceRegions(width, height, sliceCount, mergedDividers) {
     const merged = new Set(mergedDividers);
     const boundaries = [0];
     for (let k = 1; k < sliceCount; k++) {
@@ -1167,7 +1167,7 @@
   }
 
   async function sliceImageFileCore(file, sliceCount = DEFAULT_SLICE_COUNT, options = {}) {
-    const { isCancelled = () => false, signal = null, onProgress = null, mergedDividers = [] } = options;
+    const { isCancelled = () => false, signal = null, onProgress = null, mergedDividers } = options;
     const checkCancelled = () => Boolean(signal?.aborted || isCancelled());
     const reportProgress = (info) => {
       if (typeof onProgress === 'function' && !checkCancelled()) {

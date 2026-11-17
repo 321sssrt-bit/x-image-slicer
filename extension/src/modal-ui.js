@@ -655,7 +655,7 @@
     // 自由切分 merges for the current 原图 and 等分张数 N: 分割线 k sits between 等分 regions k-1 and k
     const mergedDividers = new Set();
     let currentResultPlanKey = null;
-    let splitMode = preferences.isSplitMode(initialSplitMode) ? initialSplitMode : preferences.DEFAULT_SPLIT_MODE;
+    let splitMode = initialSplitMode;
     let targetWatchObserver = null;
     let targetWatchTimer = null;
 
@@ -879,7 +879,7 @@
 
     function regenerateFromOriginal() {
       const plan = currentPlan();
-      if (!plan || !currentFile) return;
+      if (!plan) return;
       pendingGeneration = null;
       abortActiveTask();
       const token = ++activeTaskToken;
@@ -1336,8 +1336,7 @@
       const plan = currentPlan();
       if (
         !plan ||
-        currentResultPlanKey !== planKey(plan) ||
-        currentResult.slices.length !== plan.outputCount
+        currentResultPlanKey !== planKey(plan)
       ) {
         clearPreview();
         updateSliceCountVisuals(countCheck);
