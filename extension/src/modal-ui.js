@@ -1133,6 +1133,8 @@
 
         currentResult = result;
         currentResultPlanKey = planKey(plan);
+        // A success clears any earlier 超出原图宽度 / 缩放后零尺寸 error, e.g. after a merge failed and the mode switched back
+        updateSliceCountVisuals({ ok: true, value: plan.sliceCount });
         renderPreview(result);
         submitBtn.disabled = false;
         const scaleSummary = result.scaled
@@ -1166,6 +1168,8 @@
         if (!isRecoverableCountErr) {
           currentFile = null;
           fileInput.value = '';
+          // Merges belong to the dropped 原图
+          mergedDividers.clear();
           if (isReplaceMode) {
             sliceCountInput.disabled = true;
             updateSliceCountVisuals(parseSliceCountInput(sliceCountInput.value));
@@ -1177,6 +1181,7 @@
             cancelBtn.focus();
             return;
           }
+          updateSliceCountVisuals(parseSliceCountInput(sliceCountInput.value));
         }
         if (isReplaceMode && isRecoverableCountErr) {
           setStatus(

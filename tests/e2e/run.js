@@ -5383,6 +5383,11 @@ async function runTests() {
           pat.height
         );
         await expectNoPageStorage();
+        assert.deepEqual(
+          await evaluateInExtensionWorld(page, `chrome.storage.local.get(null).then((all) => Object.keys(all))`),
+          ['splitMode'],
+          'Extension storage must hold only the split mode'
+        );
 
         // 25c. Reopen goes straight to 自由, but 等分张数 resets to 8 with no leftover image or slices
         await page.evaluate(() => {
@@ -5519,6 +5524,7 @@ async function runTests() {
         // 26a. One merge on 8 等分 of 197 px: 等分 regions 3+4 (x 49..98) become one slice cut fresh from the original
         const pat = createPatternPng(197, 80);
         const patPath = writeTempFile(tmpDir, 'free-merge-197x80.png', pat.buffer);
+        await page.evaluate(() => window.__mockX.setComposerText('inline', '自由切分本地选图保留文案'));
         await entryBtn.click();
         let modal = await getModalLocators(page);
         await modal.splitModeBtn('free').click();
@@ -5544,6 +5550,10 @@ async function runTests() {
 
         await modal.submitBtn.click();
         await waitForComposerFeedback(page, '#inline-composer', 'success', /已填入 7 张切片，等待发布/);
+        assert.equal(
+          await page.locator('#inline-composer [data-testid="tweetTextarea_0"]').textContent(),
+          '自由切分本地选图保留文案'
+        );
         const st26a = await page.evaluate(() => window.__mockX.getState());
         assert.equal(st26a.submissions.length, 1);
         assert.equal(st26a.submissions[0].count, 7);
@@ -5572,6 +5582,7 @@ async function runTests() {
           document.querySelector('#inline-composer [data-testid="attachments"]').innerHTML = '';
           document.querySelector('#inline-composer [data-x-slicer-feedback="true"]')?.remove();
           window.__mockX.clearSubmissions();
+          window.__mockX.setComposerText('inline', '');
         });
         await entryBtn.click();
         modal = await getModalLocators(page);
@@ -5776,6 +5787,55 @@ async function runTests() {
         reassembleAndVerifyPngSlices(await readPreviewPngs(modal), pat.rgba, pat.width, pat.height);
         await modal.submitBtn.click();
         await waitForComposerFeedback(page, '#inline-composer', 'success', /已填入 8 张切片，等待发布/);
+
+        // 26g. A merge that makes the group unscalable (28000×3 shrinks to 0 px high) shows the error;
+        // switching to 左右等分 recovers with a valid badge and count, not a stuck error state
+        await page.evaluate(() => {
+          document.querySelector('#inline-composer [data-testid="attachments"]').innerHTML = '';
+          document.querySelector('#inline-composer [data-x-slicer-feedback="true"]')?.remove();
+          window.__mockX.clearSubmissions();
+        });
+        const stripPath = writeTempFile(tmpDir, 'free-strip-32000x3.png', createSolidPng(32000, 3, [30, 140, 200, 255]));
+        await entryBtn.click();
+        modal = await getModalLocators(page);
+        await modal.splitModeBtn('free').click();
+        await modal.fileInput.setInputFiles(stripPath);
+        await waitForPreview(8);
+        await page.evaluate(() => {
+          const sr = document.querySelector('#x-slicer-modal-host').shadowRoot;
+          for (let left = 1; left <= 6; left++) {
+            sr.querySelector(`[aria-label="合并第 ${left} 张与第 ${left + 1} 张切片"]`).click();
+          }
+        });
+        await page.waitForFunction(
+          () => document.querySelector('#x-slicer-modal-host').shadowRoot.querySelector('.status').getAttribute('data-tone') === 'error'
+        );
+        assert.equal(await modal.cards.count(), 0);
+        assert.equal(await modal.sliceBadge.textContent(), '缩放后零尺寸');
+        await modal.splitModeBtn('equal').click();
+        await waitForPreview(8);
+        assert.equal(await modal.sliceBadge.textContent(), '左右等分 1×8');
+        assert.equal(await modal.sliceCountInput.getAttribute('aria-invalid'), 'false');
+        await modal.closeBtn.click();
+        await modal.host.waitFor({ state: 'detached' });
+
+        // 26h. If the 原图 becomes unreadable mid-session, the failed merge drops the image and its merges
+        const gonePath = writeTempFile(tmpDir, 'free-gone-197x80.png', pat.buffer);
+        await entryBtn.click();
+        modal = await getModalLocators(page);
+        await modal.splitModeBtn('free').click();
+        await modal.fileInput.setInputFiles(gonePath);
+        await waitForPreview(8);
+        fs.unlinkSync(gonePath);
+        await mergeBtn(modal, 1).click();
+        await page.waitForFunction(
+          () => document.querySelector('#x-slicer-modal-host').shadowRoot.querySelector('.status').getAttribute('data-tone') === 'error'
+        );
+        assert.equal(await modal.cards.count(), 0);
+        assert.equal(await modal.fileInput.inputValue(), '');
+        assert.equal(await modal.sliceBadge.textContent(), '8 等分 · 合并后 8 张');
+        await modal.closeBtn.click();
+        await modal.host.waitFor({ state: 'detached' });
       } finally {
         // 自由 is remembered in the shared profile: never leak it into later cases
         await evaluateInExtensionWorld(page, `chrome.storage.local.clear()`);
