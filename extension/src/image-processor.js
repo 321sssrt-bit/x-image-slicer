@@ -749,16 +749,35 @@
     }
   }
 
-  function computeSliceRegions(width, height, sliceCount) {
+  // 分割线 k (1..N-1) is the boundary between 等分 regions k-1 and k. Returns them sorted, or throws.
+  function normalizeMergedDividers(sliceCount, mergedDividers) {
+    const dividers = Array.from(new Set(mergedDividers || [])).sort((a, b) => a - b);
+    for (const k of dividers) {
+      if (!Number.isInteger(k) || k < 1 || k >= sliceCount) {
+        throw new ImageValidationError('invalid-merge', `合并的分割线无效（${k}）：${sliceCount} 等分只有第 1～${sliceCount - 1} 条分割线。`);
+      }
+    }
+    if (sliceCount - dividers.length < MIN_SLICE_COUNT) {
+      throw new ImageValidationError('invalid-merge', `合并后至少保留 ${MIN_SLICE_COUNT} 张切片。`);
+    }
+    return dividers;
+  }
+
+  // Each region is the union of adjacent 等分 regions between two kept 分割线, so the group still covers the full width
+  function computeSliceRegions(width, height, sliceCount, mergedDividers = []) {
+    const merged = new Set(mergedDividers);
+    const boundaries = [0];
+    for (let k = 1; k < sliceCount; k++) {
+      if (!merged.has(k)) boundaries.push(Math.floor((k * width) / sliceCount));
+    }
+    boundaries.push(width);
     const regions = [];
-    for (let i = 0; i < sliceCount; i++) {
-      const xStart = Math.floor((i * width) / sliceCount);
-      const xEnd = Math.floor(((i + 1) * width) / sliceCount);
+    for (let i = 0; i + 1 < boundaries.length; i++) {
       regions.push({
         index: i,
-        x: xStart,
+        x: boundaries[i],
         y: 0,
-        width: xEnd - xStart,
+        width: boundaries[i + 1] - boundaries[i],
         height
       });
     }
@@ -1128,6 +1147,8 @@
       throw new ImageValidationError('empty-file', '未读取到有效图片文件或文件为空。');
     }
 
+    const mergedDividers = normalizeMergedDividers(sliceCount, options.mergedDividers);
+
     const prevTask = processorQueueTail;
     const queuedRun = prevTask
       .catch(() => {})
@@ -1135,7 +1156,7 @@
         if (checkCancelled()) return null;
         const ready = await waitDecodeSettled(signal);
         if (!ready || checkCancelled()) return null;
-        return sliceImageFileCore(file, sliceCount, options);
+        return sliceImageFileCore(file, sliceCount, { ...options, mergedDividers });
       });
     processorQueueTail = queuedRun.then(
       () => undefined,
@@ -1146,7 +1167,7 @@
   }
 
   async function sliceImageFileCore(file, sliceCount = DEFAULT_SLICE_COUNT, options = {}) {
-    const { isCancelled = () => false, signal = null, onProgress = null } = options;
+    const { isCancelled = () => false, signal = null, onProgress = null, mergedDividers = [] } = options;
     const checkCancelled = () => Boolean(signal?.aborted || isCancelled());
     const reportProgress = (info) => {
       if (typeof onProgress === 'function' && !checkCancelled()) {
@@ -1267,7 +1288,7 @@
         );
       }
 
-      const regions = computeSliceRegions(width, height, sliceCount);
+      const regions = computeSliceRegions(width, height, sliceCount, mergedDividers);
       for (const region of regions) {
         if (region.width <= 0 || region.height <= 0) {
           throw new ImageValidationError('zero-dimension', '计算切片时出现零尺寸区域。');
@@ -1358,6 +1379,7 @@
               sourceHeight: height,
               sourcePixels,
               sliceCount,
+              mergedDividers,
               format: 'png',
               mimeType: 'image/png',
               jpegQuality: null,
@@ -1442,6 +1464,7 @@
             sourceHeight: height,
             sourcePixels,
             sliceCount,
+            mergedDividers,
             format: 'png',
             mimeType: 'image/png',
             jpegQuality: null,
@@ -1493,6 +1516,7 @@
                 sourceHeight: height,
                 sourcePixels,
                 sliceCount,
+                mergedDividers,
                 format: 'jpeg',
                 mimeType: 'image/jpeg',
                 jpegQuality: quality,

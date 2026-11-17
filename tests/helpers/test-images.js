@@ -48,7 +48,8 @@ function createSolidPng(width, height, rgba = [240, 240, 240, 255]) {
   return PNG.sync.write(png);
 }
 
-function reassembleAndVerifyPngSlices(sliceBuffers, expectedRgba, expectedWidth, expectedHeight) {
+// expectedSliceWidths: exact per-slice widths for 自由切分 (merged slices differ in width); omit for 左右等分
+function reassembleAndVerifyPngSlices(sliceBuffers, expectedRgba, expectedWidth, expectedHeight, expectedSliceWidths = null) {
   const decodedSlices = sliceBuffers.map((buf) => PNG.sync.read(buf));
   const widths = decodedSlices.map((s) => s.width);
   const totalWidth = widths.reduce((sum, w) => sum + w, 0);
@@ -57,10 +58,16 @@ function reassembleAndVerifyPngSlices(sliceBuffers, expectedRgba, expectedWidth,
     throw new Error(`Reassembled width ${totalWidth} !== expected ${expectedWidth}`);
   }
 
-  const minW = Math.min(...widths);
-  const maxW = Math.max(...widths);
-  if (maxW - minW > 1) {
-    throw new Error(`Slice width difference too large: min=${minW}, max=${maxW}, widths=${widths.join(',')}`);
+  if (Array.isArray(expectedSliceWidths)) {
+    if (widths.join(',') !== expectedSliceWidths.join(',')) {
+      throw new Error(`Slice widths ${widths.join(',')} !== expected ${expectedSliceWidths.join(',')}`);
+    }
+  } else {
+    const minW = Math.min(...widths);
+    const maxW = Math.max(...widths);
+    if (maxW - minW > 1) {
+      throw new Error(`Slice width difference too large: min=${minW}, max=${maxW}, widths=${widths.join(',')}`);
+    }
   }
 
   for (let i = 0; i < decodedSlices.length; i++) {

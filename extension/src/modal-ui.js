@@ -317,6 +317,70 @@
     .preview-strip[hidden] {
       display: none;
     }
+    .preview-strip[data-split-mode="free"] {
+      gap: 0;
+    }
+    .preview-strip[aria-busy="true"] .slice-card {
+      opacity: 0.45;
+      filter: grayscale(1);
+    }
+    .slice-divider {
+      appearance: none;
+      position: relative;
+      flex: 0 0 auto;
+      align-self: stretch;
+      width: 22px;
+      margin: 0;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .slice-divider::before {
+      content: "";
+      position: absolute;
+      top: 6px;
+      bottom: 6px;
+      left: 50%;
+      border-left: 1px dashed #8b98a5;
+    }
+    .slice-divider:hover:not(:disabled)::before,
+    .slice-divider:focus-visible::before {
+      border-left: 2px solid #f4212e;
+    }
+    .slice-divider:disabled {
+      cursor: not-allowed;
+    }
+    .slice-divider:disabled::before {
+      border-left-color: #cfd9de;
+    }
+    .slice-divider:focus-visible {
+      outline: 2px solid #1d9bf0;
+      outline-offset: -2px;
+      border-radius: 6px;
+    }
+    .divider-mark {
+      position: relative;
+      width: 18px;
+      height: 18px;
+      border-radius: 9999px;
+      background: #f4212e;
+      color: #ffffff;
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      opacity: 0;
+    }
+    .slice-divider:hover:not(:disabled) .divider-mark,
+    .slice-divider:focus-visible .divider-mark {
+      opacity: 1;
+    }
     .slice-card {
       flex: 0 0 auto;
       display: flex;
@@ -538,7 +602,7 @@
             </div>
           </div>
           <p class="hint">
-            支持单张静态位图（PNG / JPEG / WebP / BMP / 静态 GIF / 静态 AVIF，原图总像素 ≤ 500,000,000，支持 4 亿像素高解析大图）。每次打开默认 8 张（推荐 5 / 8 / 20 张，可调整为 2～20 的整数）；修改张数将从原图重新切分。大图将自动按整组统一比例缩小并优化至每片长边 ≤ 4096 px、体积 ≤ 4.5 MB（透明图保留 PNG 透明背景），处理期间可随时取消或关闭。
+            支持单张静态位图（PNG / JPEG / WebP / BMP / 静态 GIF / 静态 AVIF，原图总像素 ≤ 500,000,000，支持 4 亿像素高解析大图）。每次打开默认 8 张（推荐 5 / 8 / 20 张，可调整为 2～20 的整数）；修改张数将从原图重新切分；自由切分下点击相邻切片之间分割线上的 × 可合并两侧切片（至少保留 2 张），每次合并都从原图重新生成整组切片。大图将自动按整组统一比例缩小并优化至每片长边 ≤ 4096 px、体积 ≤ 4.5 MB（透明图保留 PNG 透明背景），处理期间可随时取消或关闭。
           </p>
           <div class="status" role="status" aria-live="polite" data-tone="neutral"></div>
           <div class="summary" hidden></div>
@@ -588,6 +652,9 @@
     let submissionFinished = false;
     let targetInvalidated = false;
     let lastProcessedCountRaw = String(DEFAULT_SLICE_COUNT);
+    // 自由切分 merges for the current 原图 and 等分张数 N: 分割线 k sits between 等分 regions k-1 and k
+    const mergedDividers = new Set();
+    let currentResultPlanKey = null;
     let splitMode = preferences.isSplitMode(initialSplitMode) ? initialSplitMode : preferences.DEFAULT_SPLIT_MODE;
     let targetWatchObserver = null;
     let targetWatchTimer = null;
@@ -626,8 +693,14 @@
       objectUrls = [];
     }
 
+    function moveFocusOffPreview() {
+      if (previewStrip.contains(shadow.activeElement)) {
+        dialogEl.focus();
+      }
+    }
+
     function clearPreview() {
-      if (shadow.activeElement === submitBtn) {
+      if (shadow.activeElement === submitBtn || previewStrip.contains(shadow.activeElement)) {
         if (!sliceCountInput.disabled) {
           sliceCountInput.focus();
         } else if (!cancelBtn.disabled) {
@@ -638,7 +711,9 @@
       }
       revokeObjectUrls();
       currentResult = null;
+      currentResultPlanKey = null;
       previewStrip.innerHTML = '';
+      previewStrip.removeAttribute('aria-busy');
       previewStrip.hidden = true;
       summaryEl.textContent = '';
       summaryEl.hidden = true;
@@ -738,9 +813,90 @@
       targetWatchTimer = setInterval(checkPreviewTargetIntegrity, 150);
     }
 
-    // Free split has no merges yet, so 切片张数 M equals 等分张数 N
     function formatSliceBadge(count) {
-      return splitMode === 'free' ? `${count} 等分 · 合并后 ${count} 张` : `左右等分 1×${count}`;
+      return splitMode === 'free'
+        ? `${count} 等分 · 合并后 ${count - mergedDividers.size} 张`
+        : `左右等分 1×${count}`;
+    }
+
+    // What to generate: 等分张数 N plus the merged 分割线; 左右等分 outputs pure N regardless of kept merges.
+    // outputCount is 切片张数 M = N − merges.
+    function currentPlan() {
+      const countCheck = parseSliceCountInput(sliceCountInput.value);
+      if (!countCheck.ok) return null;
+      const dividers = splitMode === 'free' ? [...mergedDividers].sort((a, b) => a - b) : [];
+      return {
+        sliceCount: countCheck.value,
+        mergedDividers: dividers,
+        outputCount: countCheck.value - dividers.length
+      };
+    }
+
+    function planKey(plan) {
+      return `${plan.sliceCount}|${plan.mergedDividers.join(',')}`;
+    }
+
+    function describeGeneration(plan) {
+      return plan.mergedDividers.length > 0
+        ? `正在本地解码并从原图重新生成 ${plan.outputCount} 张切片（${plan.sliceCount} 等分 · 合并后 ${plan.outputCount} 张，可随时取消）...`
+        : `正在本地解码并从原图左右等分为 ${plan.sliceCount} 张切片（可随时取消）...`;
+    }
+
+    function getDividerButtons() {
+      return Array.from(previewStrip.querySelectorAll('.slice-divider'));
+    }
+
+    function renderDividerStates() {
+      const plan = currentPlan();
+      const atMinimum = !plan || plan.outputCount <= MIN_SLICE_COUNT;
+      // Dividers left on a stale 自由 preview after switching to 左右等分 must not look mergeable
+      const locked = areSliceControlsLocked() || splitMode !== 'free';
+      const dividers = getDividerButtons();
+      const nextDisabled = dividers.map(
+        (btn) => locked || atMinimum || mergedDividers.has(Number(btn.getAttribute('data-divider')))
+      );
+      if (dividers.some((btn, i) => nextDisabled[i] && shadow.activeElement === btn)) {
+        dialogEl.focus();
+      }
+      dividers.forEach((btn, i) => {
+        btn.disabled = nextDisabled[i];
+        btn.title = atMinimum ? `至少保留 ${MIN_SLICE_COUNT} 张切片，无法继续合并` : '合并相邻两张切片';
+      });
+    }
+
+    // Keep the old cards visible but greyed and unsubmittable until the latest generation lands
+    function markPreviewStale() {
+      currentResult = null;
+      currentResultPlanKey = null;
+      if (shadow.activeElement === submitBtn) {
+        dialogEl.focus();
+      }
+      submitBtn.disabled = true;
+      if (!previewStrip.hidden) {
+        previewStrip.setAttribute('aria-busy', 'true');
+      }
+    }
+
+    function regenerateFromOriginal() {
+      const plan = currentPlan();
+      if (!plan || !currentFile) return;
+      pendingGeneration = null;
+      abortActiveTask();
+      const token = ++activeTaskToken;
+      markPreviewStale();
+      renderDividerStates();
+      scheduleSliceGeneration(currentFile, plan, token);
+    }
+
+    function mergeDivider(divider) {
+      if (areSliceControlsLocked() || splitMode !== 'free' || !currentFile) return;
+      const plan = currentPlan();
+      if (!plan || !Number.isInteger(divider) || divider < 1 || divider >= plan.sliceCount) return;
+      if (mergedDividers.has(divider) || plan.outputCount <= MIN_SLICE_COUNT) return;
+      if (!checkPreviewTargetIntegrity()) return;
+      mergedDividers.add(divider);
+      sliceBadge.textContent = formatSliceBadge(plan.sliceCount);
+      regenerateFromOriginal();
     }
 
     function renderSplitMode() {
@@ -771,6 +927,13 @@
       const countCheck = parseSliceCountInput(sliceCountInput.value);
       if (countCheck.ok && sliceCountInput.getAttribute('aria-invalid') !== 'true') {
         sliceBadge.textContent = formatSliceBadge(countCheck.value);
+      }
+      if (mergedDividers.size > 0) {
+        // Merges apply only in 自由切分, so the regions changed: re-slice from the original
+        regenerateFromOriginal();
+      } else if (currentResult) {
+        // Same regions; only show or hide the 分割线 controls
+        renderPreview(currentResult);
       }
     }
 
@@ -819,8 +982,11 @@
     }
 
     function renderPreview(result) {
+      moveFocusOffPreview();
       revokeObjectUrls();
       previewStrip.innerHTML = '';
+      previewStrip.removeAttribute('aria-busy');
+      previewStrip.setAttribute('data-split-mode', splitMode);
 
       const widths = result.slices.map((s) => s.width);
       const minW = Math.min(...widths);
@@ -836,10 +1002,24 @@
         ? `JPEG 有损编码（编码质量参数 ${result.jpegQuality.toFixed(2)}）`
         : 'PNG 无损编码';
 
-      summaryEl.textContent = `原图尺寸：${result.sourceWidth} × ${result.sourceHeight} px（${result.sourcePixels.toLocaleString()} 像素） · 输出：${result.slices.length} 张 ${formatUpper} 切片（1×${result.sliceCount}，输出尺寸 ${sliceDimLabel}） · 优化：${scaleDesc} · ${encodingDesc}`;
+      const layoutDesc =
+        result.mergedDividers.length > 0
+          ? `${result.sliceCount} 等分 · 合并后 ${result.slices.length} 张`
+          : `1×${result.sliceCount}`;
+      summaryEl.textContent = `原图尺寸：${result.sourceWidth} × ${result.sourceHeight} px（${result.sourcePixels.toLocaleString()} 像素） · 输出：${result.slices.length} 张 ${formatUpper} 切片（${layoutDesc}，输出尺寸 ${sliceDimLabel}） · 优化：${scaleDesc} · ${encodingDesc}`;
       summaryEl.hidden = false;
 
-      for (const slice of result.slices) {
+      // One frame height for the whole group so merged (wider) slices still line up as a continuous strip
+      const maxRatio = Math.max(...result.slices.map((s) => s.width / s.height));
+      const frameHeight = 150 * maxRatio > 220 ? Math.max(8, Math.round(220 / maxRatio)) : 150;
+
+      const merged = new Set(result.mergedDividers);
+      const keptDividers = [];
+      for (let k = 1; k < result.sliceCount; k++) {
+        if (!merged.has(k)) keptDividers.push(k);
+      }
+
+      result.slices.forEach((slice, i) => {
         const url = URL.createObjectURL(slice.file);
         objectUrls.push(url);
 
@@ -850,17 +1030,7 @@
         const frame = document.createElement('div');
         frame.className = 'slice-frame';
 
-        // Render true aspect ratio of each slice (height 150px for tall/narrow slices, capped width for ultra-wide)
-        const baseHeight = 150;
-        const ratio = slice.width / slice.height;
-        let frameWidth = Math.round(baseHeight * ratio);
-        let frameHeight = baseHeight;
-        if (frameWidth > 220) {
-          frameWidth = 220;
-          frameHeight = Math.max(8, Math.round(220 / ratio));
-        } else if (frameWidth < 4) {
-          frameWidth = 4;
-        }
+        const frameWidth = Math.max(4, Math.round((frameHeight * slice.width) / slice.height));
         frame.style.width = `${frameWidth}px`;
         frame.style.height = `${frameHeight}px`;
 
@@ -880,12 +1050,24 @@
 
         card.append(frame, meta);
         previewStrip.appendChild(card);
-      }
+
+        if (splitMode === 'free' && i < result.slices.length - 1) {
+          const divider = document.createElement('button');
+          divider.type = 'button';
+          divider.className = 'slice-divider';
+          divider.setAttribute('data-divider', String(keptDividers[i]));
+          divider.setAttribute('aria-label', `合并第 ${i + 1} 张与第 ${i + 2} 张切片`);
+          divider.innerHTML = '<span class="divider-mark" aria-hidden="true">×</span>';
+          divider.addEventListener('click', () => mergeDivider(Number(divider.getAttribute('data-divider'))));
+          previewStrip.appendChild(divider);
+        }
+      });
 
       previewStrip.hidden = false;
+      renderDividerStates();
     }
 
-    async function runSliceGeneration(file, sliceCount, token) {
+    async function runSliceGeneration(file, plan, token) {
       if (isClosed || targetInvalidated || isSubmitting || submissionFinished || token !== activeTaskToken) {
         return;
       }
@@ -893,10 +1075,11 @@
       abortActiveTask();
       const controller = new AbortController();
       activeAbortController = controller;
-      setStatus('busy', `正在本地解码并从原图左右等分为 ${sliceCount} 张切片（可随时取消）...`);
+      setStatus('busy', describeGeneration(plan));
 
       try {
-        const result = await sliceImageFile(file, sliceCount, {
+        const result = await sliceImageFile(file, plan.sliceCount, {
+          mergedDividers: plan.mergedDividers,
           signal: controller.signal,
           isCancelled: () =>
             controller.signal.aborted || isClosed || targetInvalidated || token !== activeTaskToken,
@@ -938,17 +1121,18 @@
         }
         if (!checkPreviewTargetIntegrity()) return;
 
-        const latestCount = parseSliceCountInput(sliceCountInput.value);
+        const latestPlan = currentPlan();
         if (
-          !latestCount.ok ||
-          latestCount.value !== sliceCount ||
-          result.sliceCount !== sliceCount ||
-          result.slices.length !== sliceCount
+          !latestPlan ||
+          planKey(latestPlan) !== planKey(plan) ||
+          result.sliceCount !== plan.sliceCount ||
+          result.slices.length !== plan.outputCount
         ) {
           return;
         }
 
         currentResult = result;
+        currentResultPlanKey = planKey(plan);
         renderPreview(result);
         submitBtn.disabled = false;
         const scaleSummary = result.scaled
@@ -1009,9 +1193,9 @@
       }
     }
 
-    function scheduleSliceGeneration(file, sliceCount, token) {
-      pendingGeneration = { file, sliceCount, token };
-      setStatus('busy', `正在本地解码并从原图左右等分为 ${sliceCount} 张切片（可随时取消）...`);
+    function scheduleSliceGeneration(file, plan, token) {
+      pendingGeneration = { file, plan, token };
+      setStatus('busy', describeGeneration(plan));
       if (activeTaskPromise) {
         return activeTaskPromise;
       }
@@ -1029,7 +1213,7 @@
             ) {
               continue;
             }
-            await runSliceGeneration(req.file, req.sliceCount, req.token);
+            await runSliceGeneration(req.file, req.plan, req.token);
           }
         } finally {
           activeTaskPromise = null;
@@ -1046,6 +1230,7 @@
       pendingGeneration = null;
       abortActiveTask();
       const token = ++activeTaskToken;
+      mergedDividers.clear();
       clearPreview();
 
       const countCheck = parseSliceCountInput(sliceCountInput.value);
@@ -1066,7 +1251,7 @@
         return;
       }
 
-      await scheduleSliceGeneration(currentFile, countCheck.value, token);
+      await scheduleSliceGeneration(currentFile, currentPlan(), token);
     }
 
     function stepSliceCount(delta) {
@@ -1105,6 +1290,7 @@
       abortActiveTask();
       const token = ++activeTaskToken;
       const files = fileInput.files;
+      mergedDividers.clear();
       clearPreview();
 
       if (!files || files.length === 0) {
@@ -1134,7 +1320,7 @@
         return;
       }
 
-      await scheduleSliceGeneration(currentFile, countCheck.value, token);
+      await scheduleSliceGeneration(currentFile, currentPlan(), token);
     }
 
     async function handleSubmit() {
@@ -1142,10 +1328,11 @@
       if (!checkPreviewTargetIntegrity()) return;
 
       const countCheck = parseSliceCountInput(sliceCountInput.value);
+      const plan = currentPlan();
       if (
-        !countCheck.ok ||
-        currentResult.sliceCount !== countCheck.value ||
-        currentResult.slices.length !== countCheck.value
+        !plan ||
+        currentResultPlanKey !== planKey(plan) ||
+        currentResult.slices.length !== plan.outputCount
       ) {
         clearPreview();
         updateSliceCountVisuals(countCheck);
@@ -1172,6 +1359,7 @@
       for (const btn of [...presetBtns, ...modeBtns]) {
         btn.disabled = true;
       }
+      renderDividerStates();
       submitBtn.disabled = true;
       submitBtn.setAttribute('aria-busy', 'true');
       cancelBtn.disabled = true;
@@ -1197,6 +1385,7 @@
         fileInput.disabled = false;
         sliceCountInput.disabled = false;
         updateSliceCountVisuals(countCheck);
+        renderDividerStates();
         submitBtn.disabled = false;
         setStatus('error', preValidation.message);
         submitBtn.focus();
@@ -1614,7 +1803,7 @@
       updateSliceCountVisuals({ ok: true, value: DEFAULT_SLICE_COUNT });
       sliceCountInput.focus();
       startTargetWatch();
-      scheduleSliceGeneration(inComposerSource.sourceFile, DEFAULT_SLICE_COUNT, ++activeTaskToken);
+      scheduleSliceGeneration(inComposerSource.sourceFile, currentPlan(), ++activeTaskToken);
     } else {
       updateSliceCountVisuals({ ok: true, value: DEFAULT_SLICE_COUNT });
       setStatus(
