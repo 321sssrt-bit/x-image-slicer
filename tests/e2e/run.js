@@ -5849,7 +5849,7 @@ async function runTests() {
     });
 
     // 27. Ticket #4: 拆回 along an original 分割线, 清除合并, and the merge lifecycle across N / mode / 原图 / reopen
-    await runCase('27_free_split_split_back_clear_merges_and_merge_lifecycle', async (page) => {
+    await runCase('27_free_split_unmerge_clear_merges_and_merge_lifecycle', async (page) => {
       try {
         const entryBtn = page.locator('#inline-composer button[data-x-slicer-entry="true"]');
         const mergeBtn = (modal, left) => modal.host.getByRole('button', { name: `合并第 ${left} 张与第 ${left + 1} 张切片` });
@@ -5858,7 +5858,7 @@ async function runTests() {
           modal.host.getByRole('button', { name: `沿第 ${nth} 条原有分割线拆回第 ${slice} 张切片` });
         // 8 等分 of 197 px puts 分割线 1..7 at x = 24, 49, 73, 98, 123, 147, 172
         const pat = createPatternPng(197, 80);
-        const patPath = writeTempFile(tmpDir, 'split-back-197x80.png', pat.buffer);
+        const patPath = writeTempFile(tmpDir, 'unmerge-197x80.png', pat.buffer);
         const verifyPreview = async (modal, widths) =>
           reassembleAndVerifyPngSlices(await readPreviewPngs(modal), pat.rgba, pat.width, pat.height, widths);
 
@@ -6072,7 +6072,7 @@ async function runTests() {
 
         // 27e. A new 原图 drops the merges, in 自由 and while they are parked in 等分
         const pat2 = createPatternPng(161, 40);
-        const pat2Path = writeTempFile(tmpDir, 'split-back-other-161x40.png', pat2.buffer);
+        const pat2Path = writeTempFile(tmpDir, 'unmerge-other-161x40.png', pat2.buffer);
         await mergeTwice(8);
         await modal.fileInput.setInputFiles(pat2Path);
         await waitForSlicePreview(page, 8);
@@ -6116,7 +6116,7 @@ async function runTests() {
         await page.evaluate((bytes) => {
           window.__mockX.setComposerText('inline', '拆回后填入保留文案');
           window.__mockX.configureUserSingleUpload('inline', { removeAriaLabel: 'Remove media' });
-          window.__mockX.triggerDropFileBytes('inline', bytes, 'split-back-240x80.png', 'image/png');
+          window.__mockX.triggerDropFileBytes('inline', bytes, 'unmerge-240x80.png', 'image/png');
         }, Array.from(pat240.buffer));
         await page.waitForSelector('#inline-composer [data-testid="attachmentItem"] img');
         await entryBtn.click();
@@ -6168,7 +6168,7 @@ async function runTests() {
 
         // Square 800×800 at N = 20: merging 等分 1..4 packs 3 inner lines ~7.5 px apart in a 30 px card
         const sq = createPatternPng(800, 800);
-        const sqPath = writeTempFile(tmpDir, 'split-back-square-800.png', sq.buffer);
+        const sqPath = writeTempFile(tmpDir, 'unmerge-square-800.png', sq.buffer);
         await entryBtn.click();
         modal = await getModalLocators(page);
         await modal.presetBtn(20).click();
@@ -6191,7 +6191,7 @@ async function runTests() {
 
         // Panorama 3200×100 at N = 8, 等分 1..6 merged: the preview frames are only ~9 px high
         const pano = createPatternPng(3200, 100);
-        const panoPath = writeTempFile(tmpDir, 'split-back-pano-3200x100.png', pano.buffer);
+        const panoPath = writeTempFile(tmpDir, 'unmerge-pano-3200x100.png', pano.buffer);
         await modal.presetBtn(8).click();
         await modal.fileInput.setInputFiles(panoPath);
         await waitForSlicePreview(page, 8);
