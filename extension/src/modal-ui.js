@@ -70,7 +70,8 @@
     .file-input:focus-visible,
     .count-input:focus-visible,
     .stepper-btn:focus-visible,
-    .preset-btn:focus-visible {
+    .preset-btn:focus-visible,
+    .mode-btn:focus-visible {
       outline: 2px solid #1d9bf0;
       outline-offset: 2px;
     }
@@ -101,6 +102,7 @@
       display: none;
     }
     .file-label,
+    .mode-label,
     .count-label {
       font-size: 13px;
       font-weight: 600;
@@ -110,6 +112,44 @@
       font-size: 13px;
       color: #0f1419;
       max-width: 100%;
+    }
+    .mode-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .mode-switch {
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+      padding: 2px;
+      border: 1px solid #cfd9de;
+      border-radius: 9999px;
+      background: #ffffff;
+    }
+    .mode-btn {
+      appearance: none;
+      height: 26px;
+      padding: 0 14px;
+      border: 0;
+      border-radius: 9999px;
+      background: transparent;
+      color: #536471;
+      font-size: 13px;
+      font-weight: 600;
+      line-height: 1;
+      cursor: pointer;
+    }
+    .mode-btn:hover:not(:disabled) {
+      background: #eff3f4;
+    }
+    .mode-btn[aria-pressed="true"] {
+      background: #1d9bf0;
+      color: #ffffff;
+    }
+    .mode-btn:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
     }
     .count-group {
       display: flex;
@@ -370,11 +410,12 @@
     binding,
     triggerButton,
     mode = 'local-file',
+    splitMode: initialSplitMode,
     inComposerSource = null,
     initialError,
     onClose
   }) {
-    const { imageProcessor, composerAdapter } = XSlicer;
+    const { imageProcessor, composerAdapter, preferences } = XSlicer;
     const {
       MIN_SLICE_COUNT,
       MAX_SLICE_COUNT,
@@ -413,6 +454,27 @@
                 accept="image/png,image/jpeg,image/webp,image/bmp,image/gif,image/avif"
                 aria-label="选择单张静态原图"
               />
+            </div>
+            <div class="mode-group">
+              <span class="mode-label" id="xslicer-mode-label">切分模式</span>
+              <div class="mode-switch" role="group" aria-labelledby="xslicer-mode-label">
+                <button
+                  type="button"
+                  class="mode-btn"
+                  data-action="split-mode"
+                  data-split-mode="equal"
+                  aria-pressed="true"
+                  aria-label="左右等分"
+                >等分</button>
+                <button
+                  type="button"
+                  class="mode-btn"
+                  data-action="split-mode"
+                  data-split-mode="free"
+                  aria-pressed="false"
+                  aria-label="自由切分"
+                >自由</button>
+              </div>
             </div>
             <div class="count-group">
               <label class="count-label" for="xslicer-slice-count">切片数量（${MIN_SLICE_COUNT}～${MAX_SLICE_COUNT} 张）</label>
@@ -505,6 +567,7 @@
     const decreaseBtn = shadow.querySelector('[data-action="decrease-count"]');
     const increaseBtn = shadow.querySelector('[data-action="increase-count"]');
     const presetBtns = Array.from(shadow.querySelectorAll('[data-action="preset-count"]'));
+    const modeBtns = Array.from(shadow.querySelectorAll('[data-action="split-mode"]'));
     const sliceBadge = shadow.querySelector('.slice-badge');
     const statusEl = shadow.querySelector('.status');
     const summaryEl = shadow.querySelector('.summary');
@@ -525,6 +588,7 @@
     let submissionFinished = false;
     let targetInvalidated = false;
     let lastProcessedCountRaw = String(DEFAULT_SLICE_COUNT);
+    let splitMode = preferences.isSplitMode(initialSplitMode) ? initialSplitMode : preferences.DEFAULT_SPLIT_MODE;
     let targetWatchObserver = null;
     let targetWatchTimer = null;
 
@@ -611,6 +675,7 @@
         active === decreaseBtn ||
         active === increaseBtn ||
         presetBtns.includes(active) ||
+        modeBtns.includes(active) ||
         active === submitBtn
       ) {
         if (!cancelBtn.disabled) {
@@ -673,20 +738,51 @@
       targetWatchTimer = setInterval(checkPreviewTargetIntegrity, 150);
     }
 
-    function updateSliceCountVisuals(countCheck) {
-      const locked =
+    // Free split has no merges yet, so 切片张数 M equals 等分张数 N
+    function formatSliceBadge(count) {
+      return splitMode === 'free' ? `${count} 等分 · 合并后 ${count} 张` : `左右等分 1×${count}`;
+    }
+
+    function renderSplitMode() {
+      for (const btn of modeBtns) {
+        btn.setAttribute('aria-pressed', btn.getAttribute('data-split-mode') === splitMode ? 'true' : 'false');
+      }
+    }
+
+    function areSliceControlsLocked() {
+      return (
+        isClosed ||
         Boolean(initialError) ||
         targetInvalidated ||
         isSubmitting ||
         submissionFinished ||
-        (isReplaceMode && !currentFile);
+        (isReplaceMode && !currentFile)
+      );
+    }
+
+    function setSplitMode(nextMode) {
+      if (areSliceControlsLocked()) return;
+      if (nextMode === splitMode || !preferences.isSplitMode(nextMode)) return;
+      if (!checkPreviewTargetIntegrity()) return;
+      splitMode = nextMode;
+      preferences.saveSplitMode(nextMode);
+      renderSplitMode();
+      // Only relabel a valid count; keep error badges (e.g. 超出原图宽度) and aria-invalid untouched
+      const countCheck = parseSliceCountInput(sliceCountInput.value);
+      if (countCheck.ok && sliceCountInput.getAttribute('aria-invalid') !== 'true') {
+        sliceBadge.textContent = formatSliceBadge(countCheck.value);
+      }
+    }
+
+    function updateSliceCountVisuals(countCheck) {
+      const locked = areSliceControlsLocked();
       let nextDecreaseDisabled = locked;
       let nextIncreaseDisabled = locked;
       if (countCheck.ok) {
         const count = countCheck.value;
         sliceCountInput.setAttribute('aria-invalid', 'false');
         sliceCountInput.setAttribute('aria-valuenow', String(count));
-        sliceBadge.textContent = `左右等分 1×${count}`;
+        sliceBadge.textContent = formatSliceBadge(count);
         nextDecreaseDisabled = locked || count <= MIN_SLICE_COUNT;
         nextIncreaseDisabled = locked || count >= MAX_SLICE_COUNT;
       } else {
@@ -699,7 +795,7 @@
       if (
         (active === decreaseBtn && nextDecreaseDisabled) ||
         (active === increaseBtn && nextIncreaseDisabled) ||
-        (presetBtns.includes(active) && locked)
+        ((presetBtns.includes(active) || modeBtns.includes(active)) && locked)
       ) {
         if (!locked && !sliceCountInput.disabled) {
           sliceCountInput.focus();
@@ -716,6 +812,9 @@
         btn.disabled = locked;
         const presetVal = Number(btn.getAttribute('data-count'));
         btn.setAttribute('aria-pressed', countCheck.ok && countCheck.value === presetVal ? 'true' : 'false');
+      }
+      for (const btn of modeBtns) {
+        btn.disabled = locked;
       }
     }
 
@@ -1070,7 +1169,7 @@
       sliceCountInput.disabled = true;
       decreaseBtn.disabled = true;
       increaseBtn.disabled = true;
-      for (const btn of presetBtns) {
+      for (const btn of [...presetBtns, ...modeBtns]) {
         btn.disabled = true;
       }
       submitBtn.disabled = true;
@@ -1472,6 +1571,9 @@
         handleSliceCountChange();
       });
     }
+    for (const btn of modeBtns) {
+      btn.addEventListener('click', () => setSplitMode(btn.getAttribute('data-split-mode')));
+    }
     downloadRetainedBtn.addEventListener('click', handleDownloadRetainedSource);
     closeBtn.addEventListener('click', close);
     cancelBtn.addEventListener('click', close);
@@ -1486,12 +1588,13 @@
     host.addEventListener('keypress', stopHostKeyLeak);
     document.addEventListener('keydown', handleDocumentKeyDown, true);
 
+    renderSplitMode();
     if (initialError) {
       fileInput.disabled = true;
       sliceCountInput.disabled = true;
       decreaseBtn.disabled = true;
       increaseBtn.disabled = true;
-      for (const btn of presetBtns) {
+      for (const btn of [...presetBtns, ...modeBtns]) {
         btn.disabled = true;
       }
       submitBtn.disabled = true;

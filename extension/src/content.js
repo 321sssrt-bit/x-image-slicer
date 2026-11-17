@@ -2,7 +2,7 @@
   'use strict';
 
   const XSlicer = (globalThis.XSlicer = globalThis.XSlicer || {});
-  const { composerAdapter, modalUi } = XSlicer;
+  const { composerAdapter, modalUi, preferences } = XSlicer;
 
   const ENTRY_ATTR = 'data-x-slicer-entry';
   const composerBindings = new WeakMap();
@@ -51,7 +51,10 @@
       try {
         // Freeze an immutable snapshot for this modal session so DOM sync never alters bound target refs
         const snapshot = composerAdapter.createBindingSnapshot(currentBinding);
-        const session = await composerAdapter.prepareComposerModalSession(snapshot);
+        const [session, splitMode] = await Promise.all([
+          composerAdapter.prepareComposerModalSession(snapshot),
+          preferences.loadSplitMode()
+        ]);
         if (activeModal) {
           return;
         }
@@ -59,6 +62,7 @@
           binding: snapshot,
           triggerButton: btn,
           mode: session.ok ? session.mode : 'local-file',
+          splitMode,
           inComposerSource: session.ok ? session.inComposerSource : null,
           initialError: session.ok ? null : session.message,
           onClose() {

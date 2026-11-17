@@ -106,6 +106,7 @@ async function getModalLocators(page) {
     presetBtns: host.locator('[data-action="preset-count"]'),
     presetBtn: (n) => host.locator(`[data-action="preset-count"][data-count="${n}"]`),
     sliceBadge: host.locator('.slice-badge'),
+    splitModeBtn: (mode) => host.locator(`[data-action="split-mode"][data-split-mode="${mode}"]`),
     status: host.locator('.status'),
     summary: host.locator('.summary'),
     cards: host.locator('.slice-card'),
@@ -153,6 +154,37 @@ async function waitForComposerFeedback(page, composerSelector, expectedTone, exp
       text: box?.querySelector('.feedback-text')?.textContent || ''
     };
   }, composerSelector);
+}
+
+// Evaluates an expression inside the extension's content-script isolated world (test setup only).
+async function evaluateInExtensionWorld(page, expression) {
+  const client = await page.context().newCDPSession(page);
+  try {
+    const contexts = [];
+    client.on('Runtime.executionContextCreated', ({ context }) => contexts.push(context));
+    await client.send('Runtime.enable');
+    const extensionContext = contexts.find(
+      (c) => c.auxData?.type === 'isolated' && String(c.origin).startsWith('chrome-extension://')
+    );
+    assert.ok(extensionContext, 'Extension content-script isolated world not found');
+    const { result, exceptionDetails } = await client.send('Runtime.evaluate', {
+      expression,
+      contextId: extensionContext.id,
+      awaitPromise: true,
+      returnByValue: true
+    });
+    assert.ok(!exceptionDetails, `Extension world evaluation failed: ${exceptionDetails?.text}`);
+    return result.value;
+  } finally {
+    await client.detach();
+  }
+}
+
+async function auditPageStorage(page) {
+  return page.evaluate(async () => {
+    const dbs = typeof indexedDB.databases === 'function' ? await indexedDB.databases() : [];
+    return { localLen: localStorage.length, sessionLen: sessionStorage.length, dbCount: dbs.length };
+  });
 }
 
 async function runTests() {
@@ -5295,6 +5327,174 @@ async function runTests() {
         '弹窗单图待替换 #modal'
       );
       assert.equal((await page.evaluate(() => window.__mockX.getState())).publishClicks.length, 0);
+    });
+
+    // 25. Split mode toggle (等分 / 自由) in both entries + extension-local memory of the last-used mode only
+    await runCase('25_split_mode_toggle_and_split_mode_memory', async (page) => {
+      try {
+        const entryBtn = page.locator('#inline-composer button[data-x-slicer-entry="true"]');
+        const expectMode = async (modal, mode) => {
+          const other = mode === 'equal' ? 'free' : 'equal';
+          assert.equal(await modal.splitModeBtn(mode).getAttribute('aria-pressed'), 'true', `${mode} should be active`);
+          assert.equal(await modal.splitModeBtn(other).getAttribute('aria-pressed'), 'false', `${other} should be inactive`);
+        };
+        const expectNoPageStorage = async () => {
+          assert.deepEqual(await auditPageStorage(page), { localLen: 0, sessionLen: 0, dbCount: 0 });
+        };
+
+        // 25a. First open defaults to 左右等分, both toggles available
+        await entryBtn.click();
+        let modal = await getModalLocators(page);
+        assert.equal(await modal.splitModeBtn('equal').textContent(), '等分');
+        assert.equal(await modal.splitModeBtn('free').textContent(), '自由');
+        assert.equal(await modal.splitModeBtn('equal').isEnabled(), true);
+        assert.equal(await modal.splitModeBtn('free').isEnabled(), true);
+        await expectMode(modal, 'equal');
+        assert.equal(await modal.sliceBadge.textContent(), '左右等分 1×8');
+
+        // 25b. Free mode shows 等分张数 and 切片张数, and preview + fill still work (N = 5 here)
+        await modal.splitModeBtn('free').click();
+        await expectMode(modal, 'free');
+        assert.equal(await modal.sliceBadge.textContent(), '8 等分 · 合并后 8 张');
+
+        const pat = createPatternPng(197, 80);
+        const patPath = writeTempFile(tmpDir, 'split-mode-197x80.png', pat.buffer);
+        await modal.fileInput.setInputFiles(patPath);
+        await modal.cards.nth(7).waitFor({ state: 'visible' });
+        assert.equal(await modal.cards.count(), 8);
+        assert.equal(await modal.sliceBadge.textContent(), '8 等分 · 合并后 8 张');
+
+        await modal.presetBtn(5).click();
+        await page.waitForFunction(() => {
+          const sr = document.querySelector('#x-slicer-modal-host')?.shadowRoot;
+          return sr?.querySelectorAll('.slice-card').length === 5 && sr.querySelector('.status')?.getAttribute('data-tone') === 'success';
+        });
+        assert.equal(await modal.sliceBadge.textContent(), '5 等分 · 合并后 5 张');
+        await expectMode(modal, 'free');
+        await modal.submitBtn.click();
+        await waitForComposerFeedback(page, '#inline-composer', 'success', /已填入 5 张切片，等待发布/);
+        const st25b = await page.evaluate(() => window.__mockX.getState());
+        assert.equal(st25b.submissions.length, 1);
+        assert.equal(st25b.submissions[0].count, 5);
+        reassembleAndVerifyPngSlices(
+          st25b.submissions[0].files.map((f) => Buffer.from(f.bytes)),
+          pat.rgba,
+          pat.width,
+          pat.height
+        );
+        await expectNoPageStorage();
+
+        // 25c. Reopen goes straight to 自由, but 等分张数 resets to 8 with no leftover image or slices
+        await page.evaluate(() => {
+          document.querySelector('#inline-composer [data-testid="attachments"]').innerHTML = '';
+          document.querySelector('#inline-composer [data-x-slicer-feedback="true"]')?.remove();
+          window.__mockX.clearSubmissions();
+        });
+        await entryBtn.click();
+        modal = await getModalLocators(page);
+        await expectMode(modal, 'free');
+        assert.equal(await modal.sliceCountInput.inputValue(), '8');
+        assert.equal(await modal.sliceBadge.textContent(), '8 等分 · 合并后 8 张');
+        assert.equal(await modal.cards.count(), 0);
+        assert.equal(await modal.fileInput.inputValue(), '');
+        assert.equal(await modal.submitBtn.isDisabled(), true);
+        await modal.closeBtn.click();
+        await modal.host.waitFor({ state: 'detached' });
+
+        // 25d. Page reload keeps 自由 with a fresh 8 and nothing left over; in-composer entry fills in free mode too
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await page.waitForSelector('#inline-composer button[data-x-slicer-entry="true"]');
+        await expectNoPageStorage();
+        await entryBtn.click();
+        modal = await getModalLocators(page);
+        await expectMode(modal, 'free');
+        assert.equal(await modal.sliceCountInput.inputValue(), '8');
+        assert.equal(await modal.cards.count(), 0);
+        assert.equal(await modal.fileInput.inputValue(), '');
+        await modal.closeBtn.click();
+        await modal.host.waitFor({ state: 'detached' });
+
+        const pat240 = createPatternPng(240, 80);
+        await page.evaluate((bytes) => {
+          window.__mockX.setComposerText('inline', '自由切分框内切图保留文案 #free');
+          window.__mockX.configureUserSingleUpload('inline', { removeAriaLabel: 'Remove media' });
+          window.__mockX.triggerDropFileBytes('inline', bytes, 'free-240x80.png', 'image/png');
+        }, Array.from(pat240.buffer));
+        await page.waitForSelector('#inline-composer [data-testid="attachmentItem"] img');
+        await entryBtn.click();
+        modal = await getModalLocators(page);
+        await expectMode(modal, 'free');
+        assert.equal(await modal.sourceBanner.isVisible(), true);
+        await page.waitForFunction(() => {
+          const sr = document.querySelector('#x-slicer-modal-host')?.shadowRoot;
+          return sr?.querySelectorAll('.slice-card').length === 8 && sr.querySelector('.status')?.getAttribute('data-tone') === 'success';
+        });
+        assert.equal(await modal.sliceBadge.textContent(), '8 等分 · 合并后 8 张');
+        assert.equal(await modal.splitModeBtn('equal').isEnabled(), true);
+        await modal.submitBtn.click();
+        await waitForComposerFeedback(
+          page,
+          '#inline-composer',
+          'success',
+          /已填入 8 张切片（已替换原附件），等待发布（已保留原有文案）/
+        );
+        const st25d = await page.evaluate(() => window.__mockX.getState());
+        assert.equal(st25d.submissions.length, 1);
+        assert.equal(st25d.submissions[0].count, 8);
+        reassembleAndVerifyPngSlices(
+          st25d.submissions[0].files.map((f) => Buffer.from(f.bytes)),
+          pat240.rgba,
+          pat240.width,
+          pat240.height
+        );
+
+        // 25e. Switching back to 等分 (keyboard) is remembered across reopen and reload
+        await page.evaluate(() => {
+          document.querySelector('#inline-composer [data-testid="attachments"]').innerHTML = '';
+          document.querySelector('#inline-composer [data-x-slicer-feedback="true"]')?.remove();
+          window.__mockX.clearSubmissions();
+        });
+        await entryBtn.click();
+        modal = await getModalLocators(page);
+        await expectMode(modal, 'free');
+        await modal.splitModeBtn('equal').focus();
+        await page.keyboard.press('Enter');
+        await expectMode(modal, 'equal');
+        assert.equal(await modal.sliceBadge.textContent(), '左右等分 1×8');
+        assert.equal(
+          await page.evaluate(() => window.__mockX.getState().pageEscapeEvents),
+          0,
+          'Toggle keyboard use must not leak to the page'
+        );
+        await modal.closeBtn.click();
+        await modal.host.waitFor({ state: 'detached' });
+
+        await entryBtn.click();
+        modal = await getModalLocators(page);
+        await expectMode(modal, 'equal');
+        await modal.closeBtn.click();
+        await modal.host.waitFor({ state: 'detached' });
+
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await page.waitForSelector('#inline-composer button[data-x-slicer-entry="true"]');
+        await entryBtn.click();
+        modal = await getModalLocators(page);
+        await expectMode(modal, 'equal');
+        await modal.closeBtn.click();
+        await modal.host.waitFor({ state: 'detached' });
+
+        // 25f. A malformed stored mode falls back to 左右等分
+        await evaluateInExtensionWorld(page, `chrome.storage.local.set({ splitMode: { mode: 'free' } })`);
+        await entryBtn.click();
+        modal = await getModalLocators(page);
+        await expectMode(modal, 'equal');
+        await modal.closeBtn.click();
+        await modal.host.waitFor({ state: 'detached' });
+        await expectNoPageStorage();
+      } finally {
+        // The profile is shared by all cases: never leak a remembered mode into later ones
+        await evaluateInExtensionWorld(page, `chrome.storage.local.clear()`);
+      }
     });
 
     assert.equal(
