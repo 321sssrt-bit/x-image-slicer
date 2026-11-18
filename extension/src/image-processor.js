@@ -796,6 +796,24 @@
     return Array.from(sigCtx.getImageData(0, 0, 8, 8).data);
   }
 
+  // First-round scale: the longest slice edge is brought down to 4096 px; the byte budget may shrink it further
+  function initialSliceScale(regions, height) {
+    const lMax = Math.max(...regions.map((r) => r.width), height);
+    return lMax > MAX_SLICE_LONG_EDGE ? MAX_SLICE_LONG_EDGE / lMax : 1;
+  }
+
+  // Output size of each slice at the first-round scale, rounded exactly as sliceImageFile does
+  function plannedSliceSizes(width, height, sliceCount, mergedDividers = []) {
+    const regions = computeSliceRegions(width, height, sliceCount, mergedDividers);
+    const { targetHeight, targetWidths } = computeScaledDimensions(
+      regions,
+      height,
+      initialSliceScale(regions, height),
+      sliceCount
+    );
+    return targetWidths.map((w) => ({ width: w, height: targetHeight }));
+  }
+
   function computeScaledDimensions(regions, srcHeight, scale, sliceCount) {
     if (scale === 1) {
       return {
@@ -1305,9 +1323,8 @@
         throw new ImageValidationError('canvas-unavailable', '浏览器无法创建图像处理画布。');
       }
 
-      const maxSliceWidth = Math.max(...regions.map((r) => r.width));
-      const lMax = Math.max(maxSliceWidth, height);
-      const initialScale = lMax > MAX_SLICE_LONG_EDGE ? MAX_SLICE_LONG_EDGE / lMax : 1;
+      const lMax = Math.max(...regions.map((r) => r.width), height);
+      const initialScale = initialSliceScale(regions, height);
       const minScale = lMax > MIN_OPTIMIZED_LONG_EDGE ? MIN_OPTIMIZED_LONG_EDGE / lMax : 1;
 
       let knownTransparency =
@@ -1582,6 +1599,7 @@
     parseSliceCountInput,
     formatBytes,
     equalSplitX,
+    plannedSliceSizes,
     sliceImageFile
   };
 })();

@@ -6692,6 +6692,8 @@ async function runTests() {
         await waitForSlicePreview(page, 2);
         hints = await cropHints(modal);
         assert.deepEqual(hints.map((h) => [h.note, h.edges.length]), Array(2).fill(['按 X 网页端，\n左右裁掉不足 1%', 2]));
+        // A pixel or so is not worth changing the slices: no 调整为不裁边 for it
+        assert.equal(await modal.host.getByRole('button', { name: '调整为不裁边' }).isVisible(), false);
         await modal.fileInput.setInputFiles(writeTempFile(tmpDir, 'carousel-500x1.png', createPatternPng(500, 1).buffer));
         await waitForSlicePreview(page, 2);
         hints = await cropHints(modal);
@@ -6888,6 +6890,268 @@ async function runTests() {
           100,
           [150, 150]
         );
+      } finally {
+        await evaluateInExtensionWorld(page, `chrome.storage.local.clear()`);
+      }
+    });
+
+    await runCase('30_carousel_crop_one_click_fix_keeps_merged_slices', async (page) => {
+      try {
+        const entryBtn = page.locator('#inline-composer button[data-x-slicer-entry="true"]');
+        const mergeBtn = (modal, left) => modal.host.getByRole('button', { name: `合并第 ${left} 张与第 ${left + 1} 张切片` });
+        const fixBtn = (modal) => modal.host.getByRole('button', { name: '调整为不裁边' });
+        const notes = (modal) =>
+          modal.cards.evaluateAll((cards) => cards.map((c) => c.querySelector('.carousel-crop-note')?.textContent ?? null));
+        const resetComposer = () =>
+          page.evaluate(() => {
+            document.querySelector('#inline-composer [data-testid="attachments"]').innerHTML = '';
+            document.querySelector('#inline-composer [data-x-slicer-feedback="true"]')?.remove();
+            window.__mockX.clearSubmissions();
+            window.__mockX.setComposerText('inline', '');
+          });
+
+        // 30a. 左右等分 2 张 of 500×100 are 2.5:1 and lose 53% each. 调整为不裁边 moves to the nearest 等分张数 X shows
+        // whole: 3 张 (1.67:1) and 4 张 (1.25:1) are still wider than 0.8W at 0.68W, 5 张 of 1:1 fit. Filling then works
+        const wide = createPatternPng(500, 100);
+        await resetComposer();
+        await entryBtn.click();
+        let modal = await getModalLocators(page);
+        await modal.sliceCountInput.fill('2');
+        await modal.fileInput.setInputFiles(writeTempFile(tmpDir, 'fix-500x100.png', wide.buffer));
+        await waitForSlicePreview(page, 2);
+        assert.deepEqual(await notes(modal), Array(2).fill('按 X 网页端，\n左右约裁掉 53%'));
+        assert.equal(await fixBtn(modal).isVisible(), true, 'Visible crop offers the fix');
+        await fixBtn(modal).click();
+        await waitForSlicePreview(page, 5);
+        assert.equal(await modal.sliceCountInput.inputValue(), '5');
+        assert.equal(await modal.sliceBadge.textContent(), '左右等分 1×5');
+        assert.deepEqual(await notes(modal), Array(5).fill(null));
+        assert.equal(
+          await page.evaluate(() => document.querySelector('#x-slicer-modal-host').shadowRoot.activeElement?.id),
+          'xslicer-slice-count',
+          'Focus moves to the count it changed, not off the window'
+        );
+        assert.equal(await modal.host.locator('.carousel-crop-summary').isVisible(), false);
+        assert.equal(await fixBtn(modal).isVisible(), false);
+        await modal.submitBtn.click();
+        await waitForComposerFeedback(page, '#inline-composer', 'success', /已填入 5 张切片，等待发布/);
+        const st30a = await page.evaluate(() => window.__mockX.getState());
+        assert.equal(st30a.publishClicks.length, 0);
+        reassembleAndVerifyPngSlices(st30a.submissions[0].files.map((f) => Buffer.from(f.bytes)), wide.rgba, 500, 100, Array(5).fill(100));
+
+        // 30b. 自由切分 of 965×356 (the 2.71:1 cloud panorama's shape), 8 等分 = regions 120 | 121 | 120 | 121 | 121 | 120 |
+        // 121 | 121 px. Merging regions 5–7 (x 482–844) into the main slice: after four narrow strips X raises the box to
+        // 1.24446W and the 1.017:1 main slice loses 37%. The fix keeps that slice exactly where it is and adds the fewest
+        // merges around it: regions 2–4 (also 362 px) as the 2nd slice cap the box at 0.8W / 1.017, so every slice
+        // shows whole, and both ends stay narrow strips (1 + 3 + 3 + 1, not 3 + 1 + 3 + 1)
+        const cloud = createPatternPng(965, 356);
+        await resetComposer();
+        await entryBtn.click();
+        modal = await getModalLocators(page);
+        await modal.splitModeBtn('free').click();
+        await modal.fileInput.setInputFiles(writeTempFile(tmpDir, 'fix-965x356.png', cloud.buffer));
+        await waitForSlicePreview(page, 8);
+        assert.equal(await fixBtn(modal).isVisible(), false, 'No crop, no fix');
+        await mergeBtn(modal, 5).click();
+        await waitForSlicePreview(page, 7);
+        await mergeBtn(modal, 5).click();
+        await waitForSlicePreview(page, 6);
+        assert.deepEqual(await notes(modal), [null, null, null, null, '按 X 网页端，\n左右约裁掉 37%', null]);
+        // While the group regenerates the old preview is greyed and the fix cannot fire twice
+        const duringFix = await page.evaluate(() => {
+          const sr = document.querySelector('#x-slicer-modal-host').shadowRoot;
+          const btn = sr.querySelector('[data-action="fix-carousel-crop"]');
+          btn.click();
+          return { fixDisabled: btn.disabled, stripBusy: sr.querySelector('.preview-strip').getAttribute('aria-busy'), badge: sr.querySelector('.slice-badge').textContent };
+        });
+        assert.deepEqual(duringFix, { fixDisabled: true, stripBusy: 'true', badge: '8 等分 · 合并后 4 张' });
+        await waitForSlicePreview(page, 4);
+        assert.equal(await modal.sliceBadge.textContent(), '8 等分 · 合并后 4 张');
+        assert.deepEqual(await notes(modal), [null, null, null, null]);
+        reassembleAndVerifyPngSlices(await readPreviewPngs(modal), cloud.rgba, 965, 356, [120, 362, 362, 121]);
+        assert.equal(
+          await page.evaluate(() => document.querySelector('#x-slicer-modal-host').shadowRoot.activeElement?.className),
+          'preview-strip',
+          'Focus moves to the regenerated preview, not off the window'
+        );
+        await modal.submitBtn.click();
+        await waitForComposerFeedback(page, '#inline-composer', 'success', /已填入 4 张切片，等待发布/);
+        const st30b = await page.evaluate(() => window.__mockX.getState());
+        reassembleAndVerifyPngSlices(st30b.submissions[0].files.map((f) => Buffer.from(f.bytes)), cloud.rgba, 965, 356, [120, 362, 362, 121]);
+
+        // 30c. No fix keeps the merge: 4 等分 of 400×100 merged to 1:1 + 2:1 + 1:1. The 2:1 slice is wider than any card
+        // X shows whole among three (0.8W / 0.68W ≈ 1.18:1), and no single region is left to merge. The fix says so and
+        // changes nothing; filling still works
+        await resetComposer();
+        await entryBtn.click();
+        modal = await getModalLocators(page);
+        await modal.sliceCountInput.fill('4');
+        await modal.fileInput.setInputFiles(writeTempFile(tmpDir, 'fix-400x100.png', createPatternPng(400, 100).buffer));
+        await waitForSlicePreview(page, 4);
+        await mergeBtn(modal, 2).click();
+        await waitForSlicePreview(page, 3);
+        assert.deepEqual(await notes(modal), [null, '按 X 网页端，\n左右约裁掉 41%', null]);
+        // From the keyboard too; with nothing to change, focus stays on the button
+        await fixBtn(modal).focus();
+        await page.keyboard.press('Enter');
+        assert.equal(
+          await page.evaluate(() => document.querySelector('#x-slicer-modal-host').shadowRoot.activeElement?.textContent),
+          '调整为不裁边'
+        );
+        assert.equal(await modal.status.getAttribute('data-tone'), 'warning');
+        assert.equal(
+          await modal.status.textContent(),
+          '保留当前合并时找不到不裁边的切法：被裁的合并切片太宽，或旁边没有可再合并的等分区域。可拆窄被裁的切片，或增加等分张数后重新合并；也可以直接填入。'
+        );
+        assert.equal(await modal.cards.count(), 3);
+        assert.equal(await modal.sliceBadge.textContent(), '4 等分 · 合并后 3 张');
+        assert.equal(await modal.submitBtn.isEnabled(), true);
+        await modal.closeBtn.click();
+        await modal.host.waitFor({ state: 'detached' });
+
+        // 30d. 左右等分 20 张 of 2400×100 are 1.2:1, still 2% wider than X shows at 0.68W, and 20 is the most there is
+        await entryBtn.click();
+        modal = await getModalLocators(page);
+        await modal.splitModeBtn('equal').click();
+        await modal.presetBtn(20).click();
+        await modal.fileInput.setInputFiles(writeTempFile(tmpDir, 'fix-2400x100.png', createPatternPng(2400, 100).buffer));
+        await waitForSlicePreview(page, 20);
+        await fixBtn(modal).click();
+        assert.equal(await modal.status.getAttribute('data-tone'), 'warning');
+        assert.equal(await modal.status.textContent(), '即使切成 20 张，X 网页端仍会裁边（原图太宽）；仍可直接填入。');
+        assert.equal(await modal.sliceCountInput.inputValue(), '20');
+        assert.equal(await modal.cards.count(), 20);
+        // With no count that shows whole, the fix settles for no visible crop: 19 张 of 2360×100 lose 6%, 20 张 are
+        // 118×100 (1.18:1) and keep only 0.3% (「不足 1%」)
+        await modal.presetBtn(5).click();
+        await waitForSlicePreview(page, 5);
+        await modal.sliceCountInput.fill('19');
+        await modal.fileInput.setInputFiles(writeTempFile(tmpDir, 'fix-2360x100.png', createPatternPng(2360, 100).buffer));
+        await waitForSlicePreview(page, 19);
+        await fixBtn(modal).click();
+        await waitForSlicePreview(page, 20);
+        assert.deepEqual(await notes(modal), Array(20).fill('按 X 网页端，\n左右裁掉不足 1%'));
+        assert.equal(await fixBtn(modal).isVisible(), false);
+        await modal.closeBtn.click();
+        await modal.host.waitFor({ state: 'detached' });
+
+        // 30e. 自由切分 without merges changes 等分张数 like 左右等分. 2 张 of 472×100 lose 50%; 4 张 (118×100) would
+        // still lose 0.3% (「不足 1%」), so the fix goes to 5 张 and no hint at all is left
+        await entryBtn.click();
+        modal = await getModalLocators(page);
+        await modal.splitModeBtn('free').click();
+        await modal.sliceCountInput.fill('2');
+        await modal.fileInput.setInputFiles(writeTempFile(tmpDir, 'fix-472x100.png', createPatternPng(472, 100).buffer));
+        await waitForSlicePreview(page, 2);
+        await fixBtn(modal).click();
+        await waitForSlicePreview(page, 5);
+        assert.equal(await modal.sliceBadge.textContent(), '5 等分 · 合并后 5 张');
+        assert.deepEqual(await notes(modal), Array(5).fill(null));
+        assert.equal(await modal.host.locator('.carousel-crop-summary').isVisible(), false);
+
+        // 30f. The fewest extra merges, then the narrowest ends. 6 等分 of 1994×699 = 332 | 332 | 333 | 332 | 332 | 333 px;
+        // merging the last two (665 px, 0.95:1) after four narrow slices costs it 32%. One extra merge is enough, and two
+        // single merges work: regions 1+2 (664 + 333 + 332 + 665, ends 1329 px) or 2+3 (332 + 665 + 332 + 665, ends
+        // 997 px). The fix takes 2+3; regions 1+2 and 3+4 together (two merges) would also show whole
+        const fewest = createPatternPng(1994, 699);
+        await modal.sliceCountInput.fill('6');
+        await modal.fileInput.setInputFiles(writeTempFile(tmpDir, 'fix-1994x699.png', fewest.buffer));
+        await waitForSlicePreview(page, 6);
+        await mergeBtn(modal, 5).click();
+        await waitForSlicePreview(page, 5);
+        assert.deepEqual(await notes(modal), [null, null, null, null, '按 X 网页端，\n左右约裁掉 32%']);
+        await fixBtn(modal).click();
+        await waitForSlicePreview(page, 4);
+        reassembleAndVerifyPngSlices(await readPreviewPngs(modal), fewest.rgba, 1994, 699, [332, 665, 332, 665]);
+
+        // 30g. The merged slice never grows. 8 等分 of 280×100 (35 px regions) with regions 3–4 merged loses 8%. Taking
+        // region 2 into it would make it the 2nd card and show everything, but the fix merges regions 1–2 instead:
+        // 70 + 70 + 35 × 4, the merged slice still x 70–140
+        const keep = createPatternPng(280, 100);
+        await modal.sliceCountInput.fill('8');
+        await modal.fileInput.setInputFiles(writeTempFile(tmpDir, 'fix-280x100.png', keep.buffer));
+        await waitForSlicePreview(page, 8);
+        await mergeBtn(modal, 3).click();
+        await waitForSlicePreview(page, 7);
+        assert.deepEqual(await notes(modal), [null, null, '按 X 网页端，\n左右约裁掉 8%', null, null, null, null]);
+        await fixBtn(modal).click();
+        await waitForSlicePreview(page, 6);
+        reassembleAndVerifyPngSlices(await readPreviewPngs(modal), keep.rgba, 280, 100, [70, 70, 35, 35, 35, 35]);
+        await modal.closeBtn.click();
+        await modal.host.waitFor({ state: 'detached' });
+
+        // 30h. Large originals are judged on the slices' real output size (shared scale to 4096 px, rounded). 2 张 of
+        // 14550×4102 lose 34%. 3 张 of the original are 4850×4102, cut 0.497%, but as 4096×3464 outputs 0.506%: still
+        // 「约 1%」. One click goes straight to 4 张, which show whole
+        await entryBtn.click();
+        modal = await getModalLocators(page);
+        await modal.splitModeBtn('equal').click();
+        await modal.sliceCountInput.fill('2');
+        await modal.fileInput.setInputFiles(writeTempFile(tmpDir, 'fix-14550x4102.png', createSolidPng(14550, 4102)));
+        await waitForSlicePreview(page, 2, 90000);
+        await fixBtn(modal).click();
+        await waitForSlicePreview(page, 4, 90000);
+        assert.deepEqual(await notes(modal), Array(4).fill(null));
+        assert.equal(await fixBtn(modal).isVisible(), false);
+
+        // 自由切分 of 6600×2777 with regions 1–5 merged: 4096 + 819 × 3 output px, the wide slice cut 21%. By the original's
+        // proportions, merging regions 6–8 would leave a 2-image row X shows whole, but at the real output sizes the 2nd
+        // slice shows just under 33% at 0.68W and the wide one keeps its 21% cut. So there is no fix, and nothing changes
+        await modal.splitModeBtn('free').click();
+        await modal.sliceCountInput.fill('8');
+        await modal.fileInput.setInputFiles(writeTempFile(tmpDir, 'fix-6600x2777.png', createSolidPng(6600, 2777)));
+        await waitForSlicePreview(page, 8, 90000);
+        for (let merges = 1; merges <= 4; merges++) {
+          await mergeBtn(modal, 1).click();
+          await waitForSlicePreview(page, 8 - merges, 90000);
+        }
+        assert.deepEqual(await notes(modal), ['按 X 网页端，\n左右约裁掉 21%', null, null, null]);
+        await fixBtn(modal).click();
+        assert.equal(await modal.status.getAttribute('data-tone'), 'warning');
+        assert.equal(await modal.cards.count(), 4);
+        assert.equal(await modal.sliceBadge.textContent(), '8 等分 · 合并后 4 张');
+        await modal.closeBtn.click();
+        await modal.host.waitFor({ state: 'detached' });
+
+        // Output widths of the slices shown
+        const outputWidths = () => modal.cards.evaluateAll((cards) => cards.map((c) => c.querySelector('img').naturalWidth));
+        const fixFrom = async (name, png, count, mergeLeft) => {
+          await modal.sliceCountInput.fill(String(count));
+          await modal.fileInput.setInputFiles(writeTempFile(tmpDir, name, png));
+          await waitForSlicePreview(page, count, 90000);
+          await mergeBtn(modal, mergeLeft).click();
+          await waitForSlicePreview(page, count - 1, 90000);
+          await fixBtn(modal).click();
+        };
+        await entryBtn.click();
+        modal = await getModalLocators(page);
+        await modal.splitModeBtn('free').click();
+
+        // 30i. Shown whole first, else without visible crop. 10 等分 of 561×95 with regions 6–7 merged (112×95) loses
+        // 33%. That slice is 1.179:1, a hair wider than X shows whole even at 0.68W, so no layout leaves no cut at all;
+        // the fix still makes the 2nd card as wide (56 + 112 + 56 + 56 + 112 + 56 + 56 + 57), leaving 0.2% (「不足 1%」)
+        await fixFrom('fix-561x95.png', createPatternPng(561, 95).buffer, 10, 6);
+        await waitForSlicePreview(page, 8);
+        assert.deepEqual(await outputWidths(), [56, 112, 56, 56, 112, 56, 56, 57]);
+        assert.deepEqual(await notes(modal), [null, '按 X 网页端，\n左右裁掉不足 1%', null, null, '按 X 网页端，\n左右裁掉不足 1%', null, null, null]);
+        assert.equal(await fixBtn(modal).isVisible(), false);
+
+        // 30j. A slice a pixel wider than the one capping the box is cut under 0.1%, well under a pixel: that counts as
+        // whole. 9 等分 of 5636×1070 with regions 5–6 merged (1253 px) → 626 + 1252 + 626 + 1253 + 626 + 626 + 627, no hint
+        await fixFrom('fix-5636x1070.png', createSolidPng(5636, 1070), 9, 5);
+        await waitForSlicePreview(page, 7, 90000);
+        assert.deepEqual(await outputWidths(), [626, 1252, 626, 1253, 626, 626, 627]);
+        assert.deepEqual(await notes(modal), Array(7).fill(null));
+
+        // 30k. Whole beats narrower ends. 9 等分 of 1550×384 with regions 4–5 merged (345 px) loses 28%. Merging regions 2–3
+        // (172 + 344 + 345 + …) keeps narrower ends but leaves 0.3% on the merged slice; merging regions 1–2
+        // (344 + 172 + 345 + …) shows everything whole, so the fix takes that
+        await fixFrom('fix-1550x384.png', createPatternPng(1550, 384).buffer, 9, 4);
+        await waitForSlicePreview(page, 7);
+        assert.deepEqual(await outputWidths(), [344, 172, 345, 172, 172, 172, 173]);
+        assert.deepEqual(await notes(modal), Array(7).fill(null));
+        await modal.closeBtn.click();
+        await modal.host.waitFor({ state: 'detached' });
       } finally {
         await evaluateInExtensionWorld(page, `chrome.storage.local.clear()`);
       }

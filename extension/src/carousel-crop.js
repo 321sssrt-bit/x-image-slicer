@@ -69,15 +69,70 @@
     return height;
   }
 
+  // Cuts under 0.1% count as none: that is under half a pixel of a card (at most 0.8 × 566 px wide), and a slice one
+  // pixel wider or narrower than its neighbour after rounding lands there
+  const SUBPIXEL_CROP = 0.001;
+  // 调整为不裁边 is offered from a cut shown as 1% (0.5%) up; 「不足 1%」 is left alone
+  const VISIBLE_CROP = 0.005;
+
   // 轮播裁边 per slice (2 or more), in slice order: the fraction of its width X crops away (half on each side),
   // 0 when shown whole
   function carouselCropFractions(aspects) {
     const height = carouselHeight(aspects);
     return aspects.map((a) => {
       const crop = 1 - cardWidth(height, a) / (height * a);
-      return crop > 1e-9 ? crop : 0;
+      return crop >= SUBPIXEL_CROP ? crop : 0;
     });
   }
 
-  XSlicer.carouselCrop = { carouselCropFractions };
+  function hasVisibleCrop(aspects) {
+    return carouselCropFractions(aspects).some((crop) => crop >= VISIBLE_CROP);
+  }
+
+  function showsWhole(aspects) {
+    return carouselCropFractions(aspects).every((crop) => crop === 0);
+  }
+
+  function* combinations(items, size, start = 0) {
+    if (size === 0) {
+      yield [];
+      return;
+    }
+    for (let i = start; i <= items.length - size; i++) {
+      for (const rest of combinations(items, size - 1, i + 1)) yield [items[i], ...rest];
+    }
+  }
+
+  // 调整为不裁边 in 自由切分: every merged slice keeps its exact extent, and the fewest extra merges of the single 等分
+  // regions around them leave no 轮播裁边 at all. Among equals it keeps the narrowest first + last slice, i.e. the
+  // narrow side strips. Only when nothing shows whole does it settle for the same search without visible crop (a
+  // 「不足 1%」 left, which small originals' pixel rounding can force). 分割线 k sits between 等分 regions k-1 and k;
+  // aspectsFor(merged) gives the output slices' width / height for those merges (null when they cannot be generated).
+  // Starts at one extra merge, so a click always changes something. Returns the extra 分割线 to merge, or null.
+  function uncroppedExtraMerges(sliceCount, merged, aspectsFor) {
+    const isMerged = new Set(merged);
+    // A kept 分割线 next to a merged one bounds a merged slice, so it stays (and at least two slices remain)
+    const free = [];
+    for (let k = 1; k < sliceCount; k++) {
+      if (!isMerged.has(k) && !isMerged.has(k - 1) && !isMerged.has(k + 1)) free.push(k);
+    }
+    let fallback = null;
+    for (let size = 1; size <= free.length; size++) {
+      let best = null;
+      for (const extra of combinations(free, size)) {
+        const aspects = aspectsFor([...merged, ...extra]);
+        if (!aspects || hasVisibleCrop(aspects)) continue;
+        const edges = aspects[0] + aspects[aspects.length - 1];
+        if (showsWhole(aspects)) {
+          if (!best || edges < best.edges) best = { extra, edges };
+        } else if (!fallback || (fallback.size === size && edges < fallback.edges)) {
+          fallback = { extra, edges, size };
+        }
+      }
+      if (best) return best.extra;
+    }
+    return fallback ? fallback.extra : null;
+  }
+
+  XSlicer.carouselCrop = { carouselCropFractions, hasVisibleCrop, showsWhole, uncroppedExtraMerges };
 })();

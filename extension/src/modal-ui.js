@@ -74,6 +74,7 @@
     .preset-btn:focus-visible,
     .mode-btn:focus-visible,
     .clear-merges-btn:focus-visible,
+    .fix-crop-btn:focus-visible,
     .preview-strip:focus-visible {
       outline: 2px solid #1d9bf0;
       outline-offset: 2px;
@@ -518,10 +519,42 @@
       /* One text node broken over two lines, so screen readers read it as one phrase */
       white-space: pre-line;
     }
+    .carousel-crop-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px 12px;
+    }
+    .carousel-crop-row[hidden] {
+      display: none;
+    }
     .carousel-crop-summary {
+      flex: 1 1 320px;
       font-size: 13px;
       line-height: 1.5;
       color: #b54708;
+    }
+    .fix-crop-btn {
+      appearance: none;
+      height: 30px;
+      padding: 0 14px;
+      border-radius: 9999px;
+      border: 1px solid #fdb022;
+      background: #fffaeb;
+      color: #b54708;
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+    .fix-crop-btn:hover:not(:disabled) {
+      background: #fef0c7;
+    }
+    .fix-crop-btn:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
     }
     .slice-meta {
       font-size: 11px;
@@ -603,6 +636,7 @@
       parseSliceCountInput,
       formatBytes,
       equalSplitX,
+      plannedSliceSizes,
       sliceImageFile
     } = imageProcessor;
     const isReplaceMode = mode === 'replace-existing' && Boolean(inComposerSource?.sourceFile);
@@ -726,7 +760,10 @@
           </p>
           <div class="status" role="status" aria-live="polite" data-tone="neutral"></div>
           <div class="summary" hidden></div>
-          <div class="carousel-crop-summary" id="xslicer-carousel-crop-summary" hidden></div>
+          <div class="carousel-crop-row" hidden>
+            <div class="carousel-crop-summary" id="xslicer-carousel-crop-summary"></div>
+            <button type="button" class="fix-crop-btn" data-action="fix-carousel-crop" hidden>调整为不裁边</button>
+          </div>
           <div class="preview-strip" aria-label="切片预览列表" tabindex="-1" hidden></div>
         </div>
         <div class="footer">
@@ -758,7 +795,9 @@
     const sliceBadge = shadow.querySelector('.slice-badge');
     const statusEl = shadow.querySelector('.status');
     const summaryEl = shadow.querySelector('.summary');
+    const cropRowEl = shadow.querySelector('.carousel-crop-row');
     const cropSummaryEl = shadow.querySelector('.carousel-crop-summary');
+    const fixCropBtn = shadow.querySelector('[data-action="fix-carousel-crop"]');
     const previewStrip = shadow.querySelector('.preview-strip');
 
     let activeTaskToken = 0;
@@ -856,7 +895,11 @@
     }
 
     function clearPreview() {
-      if (shadow.activeElement === submitBtn || previewStrip.contains(shadow.activeElement)) {
+      if (
+        shadow.activeElement === submitBtn ||
+        shadow.activeElement === fixCropBtn ||
+        previewStrip.contains(shadow.activeElement)
+      ) {
         if (!sliceCountInput.disabled) {
           sliceCountInput.focus();
         } else if (!cancelBtn.disabled) {
@@ -875,7 +918,7 @@
       summaryEl.textContent = '';
       summaryEl.hidden = true;
       cropSummaryEl.textContent = '';
-      cropSummaryEl.hidden = true;
+      cropRowEl.hidden = true;
       submitBtn.disabled = true;
     }
 
@@ -1033,6 +1076,7 @@
       clearMergesBtn.hidden = splitMode !== 'free';
       // After 清除合并 focus moves to the 自由 button beside it
       setDisabledKeepingFocus(clearMergesBtn, locked || mergedDividers.size === 0, freeModeBtn);
+      setDisabledKeepingFocus(fixCropBtn, areSliceControlsLocked() || !currentResult, previewStrip);
     }
 
     // Keep the old cards visible but greyed and unsubmittable until the latest generation lands
@@ -1047,6 +1091,7 @@
         previewStrip.setAttribute('aria-busy', 'true');
         cropSummaryEl.setAttribute('aria-busy', 'true');
       }
+      setDisabledKeepingFocus(fixCropBtn, true, previewStrip);
     }
 
     // Merges changed: relabel (dropping any earlier error marking) and re-slice the whole group from the original
@@ -1089,6 +1134,56 @@
       if (!checkPreviewTargetIntegrity()) return;
       mergedDividers.clear();
       applyMergeChange(currentPlan().sliceCount);
+    }
+
+    // 调整为不裁边, only on request: 自由切分 keeps every merged slice where it is and merges some single 等分 regions
+    // around them; otherwise (左右等分, or no merges) the nearest larger 等分张数 X shows whole. Candidates are judged
+    // on the output sizes the slices will really have (shared scale, rounded), not on the original's proportions
+    function fixCarouselCrop() {
+      if (areSliceControlsLocked() || !currentResult || !checkPreviewTargetIntegrity()) return;
+      const { sourceWidth, sourceHeight, sliceCount } = currentResult;
+      const outputAspects = (count, merges) => {
+        try {
+          return plannedSliceSizes(sourceWidth, sourceHeight, count, merges).map((s) => s.width / s.height);
+        } catch {
+          return null; // a zero-size slice cannot be generated
+        }
+      };
+      if (splitMode === 'free' && mergedDividers.size > 0) {
+        const extra = carouselCrop.uncroppedExtraMerges(sliceCount, [...mergedDividers], (merges) =>
+          outputAspects(sliceCount, merges)
+        );
+        if (!extra) {
+          setStatus(
+            'warning',
+            '保留当前合并时找不到不裁边的切法：被裁的合并切片太宽，或旁边没有可再合并的等分区域。可拆窄被裁的切片，或增加等分张数后重新合并；也可以直接填入。'
+          );
+          return;
+        }
+        // The button hides once the new preview shows whole: focus waits on the regenerating preview
+        previewStrip.focus();
+        for (const k of extra) mergedDividers.add(k);
+        applyMergeChange(sliceCount);
+        return;
+      }
+      // The smallest count that shows whole, else the smallest without visible crop
+      let nextCount = null;
+      for (let count = sliceCount + 1; count <= Math.min(MAX_SLICE_COUNT, sourceWidth); count++) {
+        const aspects = outputAspects(count, []);
+        if (!aspects || carouselCrop.hasVisibleCrop(aspects)) continue;
+        if (carouselCrop.showsWhole(aspects)) {
+          nextCount = count;
+          break;
+        }
+        nextCount ??= count;
+      }
+      if (nextCount) {
+        // Focus on the button moves to the count when the preview clears
+        sliceCountInput.value = String(nextCount);
+        handleSliceCountChange();
+        return;
+      }
+      setStatus('warning', `即使切成 ${MAX_SLICE_COUNT} 张，X 网页端仍会裁边（原图太宽）；仍可直接填入。`);
     }
 
     function renderSplitMode() {
@@ -1215,8 +1310,9 @@
         croppedNumbers.length > 0
           ? `按 X 网页端多图轮播，第 ${croppedNumbers.join('、')} 张切片会被居中裁掉左右边缘（预览中已标出被裁区域）。仅作提示，不影响合并或填入。`
           : '';
-      cropSummaryEl.hidden = croppedNumbers.length === 0;
+      cropRowEl.hidden = croppedNumbers.length === 0;
       cropSummaryEl.removeAttribute('aria-busy');
+      fixCropBtn.hidden = !carouselCrop.hasVisibleCrop(ratios);
 
       const merged = new Set(result.mergedDividers);
       const keptDividers = [];
@@ -2030,6 +2126,7 @@
     }
     previewStrip.addEventListener('focusin', revealFocusedDivider);
     clearMergesBtn.addEventListener('click', clearMerges);
+    fixCropBtn.addEventListener('click', fixCarouselCrop);
     downloadRetainedBtn.addEventListener('click', handleDownloadRetainedSource);
     closeBtn.addEventListener('click', close);
     cancelBtn.addEventListener('click', close);
