@@ -991,33 +991,56 @@
     return true;
   }
 
-  function checkVisualLayoutOrder(readyItems) {
+  const LAYOUT_ORDER_MISMATCH_MESSAGE = '发帖框附件的横向排列顺序与 DOM 顺序不一致，无法确认从左到右顺序正确。';
+
+  function measureAttachmentSlots(readyItems) {
     const rects = readyItems.map((item) => item.element.getBoundingClientRect());
-    for (let i = 0; i < rects.length; i++) {
-      const curr = rects[i];
-      if (curr.width <= 0 || curr.height <= 0) {
-        return {
-          ok: false,
-          reason: 'visual-order-mismatch',
-          message: '检测到发帖框中存在不可见或零尺寸的附件槽位，无法确认从左到右排列顺序。'
-        };
-      }
-      if (i > 0) {
-        const prev = rects[i - 1];
-        const rowTol = Math.max(12, Math.min(prev.height, curr.height) * 0.5);
-        const sameRow = Math.abs(prev.top - curr.top) < rowTol;
-        const currAbovePrev = curr.top + rowTol < prev.top;
-        const notRightwardInSameRow = sameRow && curr.left <= prev.left + Math.min(2, prev.width * 0.1);
-        if (currAbovePrev || notRightwardInSameRow) {
-          return {
-            ok: false,
-            reason: 'visual-order-mismatch',
-            message: '发帖框附件的横向排列顺序与 DOM 顺序不一致，无法确认从左到右顺序正确。'
-          };
-        }
-      }
+    if (rects.some((r) => r.width <= 0 || r.height <= 0)) {
+      return {
+        ok: false,
+        reason: 'visual-order-mismatch',
+        message: '检测到发帖框中存在不可见或零尺寸的附件槽位，无法确认从左到右排列顺序。'
+      };
     }
     return { ok: true, rects };
+  }
+
+  // Visual left-to-right (row-major) layout agrees with DOM order
+  function domFollowsRows(rects) {
+    for (let i = 1; i < rects.length; i++) {
+      const prev = rects[i - 1];
+      const curr = rects[i];
+      const rowTol = Math.max(12, Math.min(prev.height, curr.height) * 0.5);
+      const sameRow = Math.abs(prev.top - curr.top) < rowTol;
+      const currAbovePrev = curr.top + rowTol < prev.top;
+      const notRightwardInSameRow = sameRow && curr.left <= prev.left + Math.min(2, prev.width * 0.1);
+      if (currAbovePrev || notRightwardInSameRow) return false;
+    }
+    return true;
+  }
+
+  // X lays 4 media out as a 2×2 grid filled column by column, so the DOM runs 1, 3, 2, 4 while the grid reads, and the
+  // post keeps (seen on a real post), 1, 2, 3, 4. True only for that layout with clear rows and columns
+  function isXGrid4ColumnMajor(rects) {
+    if (rects.length !== 4) return false;
+    const [topLeft, bottomLeft, topRight, bottomRight] = rects;
+    const w = Math.min(...rects.map((r) => r.width));
+    const h = Math.min(...rects.map((r) => r.height));
+    if (w <= 0 || h <= 0) return false;
+    return (
+      Math.abs(topLeft.left - bottomLeft.left) <= w * 0.25 &&
+      Math.abs(topRight.left - bottomRight.left) <= w * 0.25 &&
+      Math.abs(topLeft.top - topRight.top) <= h * 0.25 &&
+      Math.abs(bottomLeft.top - bottomRight.top) <= h * 0.25 &&
+      bottomLeft.top - topLeft.top >= h * 0.75 &&
+      topRight.left - topLeft.left >= w * 0.75
+    );
+  }
+
+  function slotLayoutKind(rects) {
+    if (domFollowsRows(rects)) return 'rows';
+    if (isXGrid4ColumnMajor(rects)) return 'x-grid-4';
+    return null;
   }
 
   async function verifyAttachmentOrder(readyItems, slices) {
@@ -1025,12 +1048,26 @@
       return { ok: false, reason: 'count-mismatch', message: '附件数量与预期切片数不一致。' };
     }
 
-    // 1. Visual left-to-right (row-major) layout must agree with DOM order
-    const layoutCheck = checkVisualLayoutOrder(readyItems);
-    if (!layoutCheck.ok) {
-      return layoutCheck;
+    // 1. Visual left-to-right (row-major) layout must agree with DOM order, or be X's 4-media grid
+    const measured = measureAttachmentSlots(readyItems);
+    if (!measured.ok) return measured;
+    const layout = slotLayoutKind(measured.rects);
+    if (layout === 'rows') {
+      return verifySliceContentOrder(readyItems, slices);
+    }
+    const layoutMismatch = { ok: false, reason: 'visual-order-mismatch', message: LAYOUT_ORDER_MISMATCH_MESSAGE };
+    if (layout !== 'x-grid-4') {
+      return layoutMismatch;
     }
 
+    // Check the grid in reading order; only a positive match clears it, if the slots can't be told apart the layout
+    // mismatch stands
+    const [a, b, c, d] = readyItems;
+    const contentCheck = await verifySliceContentOrder([a, c, b, d], slices);
+    return contentCheck.reason === 'order-unconfirmed' ? layoutMismatch : contentCheck;
+  }
+
+  async function verifySliceContentOrder(readyItems, slices) {
     // 2. Check explicit filename identity if present on all slots
     let allExplicitlyNamed = true;
     for (let i = 0; i < readyItems.length; i++) {
@@ -2074,9 +2111,14 @@
               return;
             }
 
-            const postLayout = checkVisualLayoutOrder(postState.readyItems);
+            const postLayout = measureAttachmentSlots(postState.readyItems);
             if (!postLayout.ok) {
               finish(buildOrderMismatchOutcome(postLayout.reason, postLayout.message, readyCount));
+              return;
+            }
+            const postLayoutKind = slotLayoutKind(postLayout.rects);
+            if (!postLayoutKind) {
+              finish(buildOrderMismatchOutcome('visual-order-mismatch', LAYOUT_ORDER_MISMATCH_MESSAGE, readyCount));
               return;
             }
 
@@ -2085,7 +2127,8 @@
                 Math.abs(r.left - verifiedRects[idx].left) > 2 ||
                 Math.abs(r.top - verifiedRects[idx].top) > 2
             );
-            if (layoutMoved) {
+            // A layout that now reads in another order (rows vs X's grid) was not what the order check judged
+            if (layoutMoved || postLayoutKind !== slotLayoutKind(verifiedRects)) {
               fullReadySince = null;
               return;
             }

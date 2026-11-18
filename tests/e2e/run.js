@@ -7157,6 +7157,54 @@ async function runTests() {
       }
     });
 
+    await runCase('31_x_composer_4_grid_order_reads_by_rows', async (page) => {
+      const entryBtn = page.locator('#inline-composer button[data-x-slicer-entry="true"]');
+      const bands4Path = writeTempFile(tmpDir, 'bands-4-400x120.png', createColorBandsPng(100, 120, 4, 255));
+      const fillFour = async (uploadMode, layoutMode = 'default', imagePath = bands4Path) => {
+        await page.evaluate(([mode, layout]) => {
+          document.querySelector('#inline-composer [data-testid="attachments"]').innerHTML = '';
+          document.querySelector('#inline-composer [data-x-slicer-feedback="true"]')?.remove();
+          window.__mockX.setLayoutMode(layout);
+          window.__mockX.setUploadMode(mode);
+        }, [uploadMode, layoutMode]);
+        await entryBtn.click();
+        const modal = await getModalLocators(page);
+        await modal.sliceCountInput.fill('4');
+        await modal.fileInput.setInputFiles(imagePath);
+        await waitForSlicePreview(page, 4);
+        await modal.submitBtn.click();
+      };
+      try {
+        // 31a. X lays 4 thumbnails out as a 2×2 grid filled column by column: DOM 1, 3, 2, 4, read row by row as
+        // 1, 2, 3, 4. The check follows what the user sees, so this is the right order, not a 切片顺序错误
+        await fillFour('x-composer-grid');
+        await waitForComposerFeedback(page, '#inline-composer', 'success', /已填入 4 张切片，等待发布/);
+
+        // 31b. The same grid with DOM 1, 2, 3, 4 reads 1, 3, 2, 4 on screen: the slices themselves show the swap
+        await fillFour('x-composer-grid-misordered');
+        await waitForComposerFeedback(page, '#inline-composer', 'error', /切片顺序错误：检测到第 2 个附件与第 3 张切片文件一致/);
+
+        // 31c. Only X's 2×2 grid is known to post in reading order. A row whose DOM runs 4, 3, 2, 1 under row-reverse
+        // reads 1, 2, 3, 4 and its slices match on screen, yet the post may follow the DOM: still a layout mismatch
+        await fillFour('reversed-dom', 'row-reverse');
+        await waitForComposerFeedback(page, '#inline-composer', 'error', /切片顺序错误：发帖框附件的横向排列顺序与 DOM 顺序不一致/);
+
+        // 31d. The grid only passes on a positive match: 4 identical slices can't show their order, so the layout
+        // mismatch stands instead of easing into 无法确认
+        await fillFour('x-composer-grid', 'default', writeTempFile(tmpDir, 'solid-400x120.png', createSolidPng(400, 120)));
+        await waitForComposerFeedback(page, '#inline-composer', 'error', /切片顺序错误：发帖框附件的横向排列顺序与 DOM 顺序不一致/);
+      } finally {
+        await page.evaluate(() => {
+          const attachments = document.querySelector('#inline-composer [data-testid="attachments"]');
+          attachments.innerHTML = '';
+          attachments.classList.remove('wrap-grid', 'row-reverse', 'x-grid-4');
+          document.querySelector('#inline-composer [data-x-slicer-feedback="true"]')?.remove();
+          window.__mockX.setLayoutMode('default');
+          window.__mockX.setUploadMode('immediate');
+        });
+      }
+    });
+
     assert.equal(
       unexpectedRequests.length,
       0,

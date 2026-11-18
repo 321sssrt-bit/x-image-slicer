@@ -349,7 +349,7 @@
 
   function applyLayoutClass(el) {
     if (!el) return;
-    el.classList.remove('wrap-grid', 'row-reverse');
+    el.classList.remove('wrap-grid', 'row-reverse', 'x-grid-4');
     if (state.layoutMode === 'wrap-grid' || state.layoutMode === 'row-reverse') {
       el.classList.add(state.layoutMode);
     }
@@ -509,6 +509,26 @@
           customSrc: `https://pbs.twimg.com/media/mock-slice-${idx}.png`
         });
       });
+      return;
+    }
+
+    // Real X composer thumbnails for 4 media: a 2×2 grid built column by column, so its DOM runs 1, 3, 2, 4 while the
+    // grid reads (and the post keeps) 1, 2, 3, 4. The misordered variant lays the DOM 1, 2, 3, 4 out the same way, so
+    // the grid reads 1, 3, 2, 4: a real order problem
+    if ((mode === 'x-composer-grid' || mode === 'x-composer-grid-misordered') && files.length === 4) {
+      attachments.classList.add('x-grid-4');
+      const domOrder = mode === 'x-composer-grid' ? [0, 2, 1, 3] : [0, 1, 2, 3];
+      for (const i of domOrder) {
+        renderAttachmentCard(attachments, files[i], 'ready', { anonymous: true });
+      }
+      return;
+    }
+
+    // Anonymous slots with the DOM in reverse, so under row-reverse a single row reads 1, 2, 3, 4 on screen
+    if (mode === 'reversed-dom') {
+      for (const file of [...files].reverse()) {
+        renderAttachmentCard(attachments, file, 'ready', { anonymous: true });
+      }
       return;
     }
 
