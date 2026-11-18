@@ -6255,7 +6255,7 @@ async function runTests() {
         await page.evaluate(() => {
           const sr = document.querySelector('#x-slicer-modal-host').shadowRoot;
           sr.querySelector('[aria-label="合并第 1 张与第 2 张切片"]').click();
-          sr.querySelector('#xslicer-slice-count').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+          sr.querySelector('#xslicer-slice-count').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, composed: true }));
         });
         await waitForSlicePreview(page, 18);
         assert.equal(await modal.sliceBadge.textContent(), '20 等分 · 合并后 18 张');
@@ -6337,21 +6337,27 @@ async function runTests() {
           }
           throw new Error(`Tab never reached ${label}: ${path.join(' → ')}`);
         };
-        const sliceCount = () =>
-          page.evaluate(() => document.querySelector('#x-slicer-modal-host').shadowRoot.querySelectorAll('.slice-card').length);
-
         await page.evaluate((text) => window.__mockX.setComposerText('inline', text), draft);
         await entryBtn.focus();
         await page.keyboard.press('Enter');
         const modal = await getModalLocators(page);
 
-        // Keys that reach the page's own handlers, and any moment focus drops out of the window
+        // Keys that reach any of the page's own listeners (capture or bubble, like X's shortcuts), and any moment
+        // focus drops out of the window
         await page.evaluate(() => {
           const leaks = (window.__keyLeaks = []);
-          for (const type of ['keydown', 'keypress']) {
-            window.addEventListener(type, (e) => {
-              if (['Delete', 'Backspace', 'Enter', 'Tab', ' '].includes(e.key)) leaks.push(`${type}:${e.key}`);
-            });
+          for (const target of [window, document]) {
+            for (const type of ['keydown', 'keypress', 'keyup']) {
+              for (const capture of [true, false]) {
+                target.addEventListener(
+                  type,
+                  (e) => {
+                    if (['Delete', 'Backspace', 'Enter', 'Tab', ' '].includes(e.key)) leaks.push(`${type}:${e.key}`);
+                  },
+                  capture
+                );
+              }
+            }
           }
           const host = document.querySelector('#x-slicer-modal-host');
           const lost = (window.__focusLost = []);
@@ -6366,9 +6372,15 @@ async function runTests() {
         assert.equal(await modal.splitModeBtn('free').getAttribute('aria-pressed'), 'true');
         await modal.fileInput.setInputFiles(patPath);
         await waitForSlicePreview(page, 8);
-        await modal.presetBtn(20).focus();
+        assert.equal((await focused()).label, '自由切分');
         const forward = await tabTo('填入发帖框');
         assert.deepEqual(forward, [
+          '减少切片数量',
+          '切片数量',
+          '增加切片数量',
+          '推荐切片数量 5 张',
+          '推荐切片数量 8 张',
+          '推荐切片数量 20 张',
           '合并第 1 张与第 2 张切片',
           '合并第 2 张与第 3 张切片',
           '合并第 3 张与第 4 张切片',
@@ -6402,7 +6414,7 @@ async function runTests() {
         await page.keyboard.down('Enter');
         await page.keyboard.up('Enter');
         await page.waitForTimeout(300);
-        assert.equal(await sliceCount(), 7, 'A repeated Enter must not 合并 again');
+        assert.equal(await modal.cards.count(), 7, 'A repeated Enter must not 合并 again');
         assert.equal(await modal.sliceBadge.textContent(), '8 等分 · 合并后 7 张');
         reassembleAndVerifyPngSlices(await readPreviewPngs(modal), pat.rgba, pat.width, pat.height, [24, 25, 24, 50, 24, 25, 25]);
 
@@ -6432,7 +6444,7 @@ async function runTests() {
           await page.keyboard.press('Backspace');
         }
         await page.waitForTimeout(300);
-        assert.equal(await sliceCount(), 2);
+        assert.equal(await modal.cards.count(), 2);
         assert.equal(await modal.status.getAttribute('data-tone'), 'success');
         assert.equal(await modal.host.locator('.preview-strip').getAttribute('aria-busy'), null);
         assert.equal(await modal.sliceBadge.textContent(), '8 等分 · 合并后 2 张');
@@ -6468,7 +6480,6 @@ async function runTests() {
           document.querySelector('#inline-composer [data-x-slicer-feedback="true"]')?.remove();
           window.__mockX.clearSubmissions();
         });
-        await entryBtn.focus();
         await page.keyboard.press('Enter');
         await getModalLocators(page);
         await page.evaluate(() => (window.__keyLeaks.length = 0));
@@ -6496,7 +6507,88 @@ async function runTests() {
           })),
           { focusOnEntry: true, leaks: [], escapes: 0, submissions: 0, text: draft }
         );
+
+        // 28h. A larger original keeps the preview regenerating while the keyboard moves on: Tab / Shift+Tab from
+        // the busy preview continue from the 分割线 just merged, so a second Delete merges its neighbour
+        const big = createPatternPng(2400, 1600);
+        const bigPath = writeTempFile(tmpDir, 'keyboard-2400x1600.png', big.buffer);
+        const unmergeLabels = () =>
+          modal.host.locator('.merged-divider').evaluateAll((lines) => lines.map((l) => l.getAttribute('aria-label')));
+        await page.keyboard.press('Enter');
+        await getModalLocators(page);
+        await page.evaluate(() => (window.__keyLeaks.length = 0));
+        await modal.fileInput.setInputFiles(bigPath);
+        await waitForSlicePreview(page, 8, 60000);
+        await tabTo('合并第 4 张与第 5 张切片');
+        await page.keyboard.press('Delete');
+        await page.keyboard.press('Tab');
+        await page.keyboard.press('Delete');
+        await waitForSlicePreview(page, 6, 60000);
+        assert.deepEqual(await unmergeLabels(), ['沿第 1 条原有分割线拆回第 4 张切片', '沿第 2 条原有分割线拆回第 4 张切片']);
+        assert.equal((await focused()).label, '沿第 2 条原有分割线拆回第 4 张切片');
+        await tabTo('合并第 3 张与第 4 张切片', { shift: true });
+        await page.keyboard.press('Delete');
+        await page.keyboard.press('Shift+Tab');
+        await page.keyboard.press('Delete');
+        await waitForSlicePreview(page, 4, 60000);
+        assert.equal(await modal.sliceBadge.textContent(), '8 等分 · 合并后 4 张');
+        assert.equal((await focused()).label, '沿第 1 条原有分割线拆回第 2 张切片');
+        // The last 分割线: Tab moves on to 取消 rather than back to the first ×
+        await tabTo('合并第 3 张与第 4 张切片');
+        await page.keyboard.press('Delete');
+        await page.keyboard.press('Tab');
+        await waitForSlicePreview(page, 3, 60000);
+        assert.equal((await focused()).label, '取消');
+
+        // 28i. At 20 slices every × reached by Tab / Shift+Tab is fully inside the preview, never cut by its edge
+        await tabTo('推荐切片数量 20 张', { shift: true });
+        await page.keyboard.press('Enter');
+        await waitForSlicePreview(page, 20, 60000);
+        const outsideStrip = () =>
+          page.evaluate(() => {
+            const sr = document.querySelector('#x-slicer-modal-host').shadowRoot;
+            const strip = sr.querySelector('.preview-strip').getBoundingClientRect();
+            const r = sr.activeElement.getBoundingClientRect();
+            return Math.max(0, strip.left - r.left, r.right - strip.right);
+          });
+        for (const shift of [false, true]) {
+          for (let left = 1; left <= 19; left++) {
+            const n = shift ? 20 - left : left;
+            await tabTo(`合并第 ${n} 张与第 ${n + 1} 张切片`, { shift });
+            assert.equal(await outsideStrip(), 0, `× ${n} is cut by the preview edge`);
+          }
+        }
+
+        // 28j. Focus on the dialog or the preview itself (a click on their text or images): Shift+Tab wraps inside the
+        // window instead of escaping onto X, and scrolling keys never scroll the X page underneath
+        await page.evaluate(() => {
+          document.body.style.minHeight = '5000px';
+          window.scrollTo(0, 100);
+        });
+        for (const spot of [modal.dialog.locator('.title'), modal.cards.nth(10).locator('img')]) {
+          await spot.click();
+          for (const key of ['Space', 'PageDown', 'ArrowDown', 'End']) await page.keyboard.press(key);
+          await page.waitForTimeout(200);
+          assert.equal(await page.evaluate(() => window.scrollY), 100, 'Keys inside the window must not scroll the X page');
+        }
+        await modal.dialog.locator('.title').click();
+        await page.keyboard.press('Shift+Tab');
+        assert.deepEqual(await focused(), { inModal: true, label: '填入发帖框', markOpacity: null });
+        await page.keyboard.press('Escape');
+        await modal.host.waitFor({ state: 'detached' });
+        assert.deepEqual(
+          await page.evaluate(() => ({
+            leaks: window.__keyLeaks,
+            publishClicks: window.__mockX.getState().publishClicks.length,
+            submissions: window.__mockX.getState().submissions.length,
+            text: document.querySelector('#inline-composer [data-testid="tweetTextarea_0"]').textContent
+          })),
+          { leaks: [], publishClicks: 0, submissions: 0, text: draft }
+        );
       } finally {
+        await page.evaluate(() => {
+          document.body.style.minHeight = '';
+        });
         await evaluateInExtensionWorld(page, `chrome.storage.local.clear()`);
       }
     });

@@ -33,6 +33,7 @@
       overflow: hidden;
       border: 1px solid #cfd9de;
       outline: none;
+      overscroll-behavior: contain;
     }
     .header {
       display: flex;
@@ -80,6 +81,7 @@
     .body {
       padding: 16px 20px;
       overflow-y: auto;
+      overscroll-behavior: contain;
       display: flex;
       flex-direction: column;
       gap: 14px;
@@ -790,6 +792,20 @@
       previewStrip.focus();
     }
 
+    // focus() stops scrolling once a control is partly in view: bring a focused 分割线 control fully past the strip's
+    // padding so its ×/＋ and focus ring are never cut by the strip edge (only the strip scrolls, never the page)
+    function revealFocusedDivider(event) {
+      if (event.target === previewStrip) return;
+      const control = event.target.getBoundingClientRect();
+      const strip = previewStrip.getBoundingClientRect();
+      const inset = 12;
+      if (control.left < strip.left + inset) {
+        previewStrip.scrollLeft -= strip.left + inset - control.left;
+      } else if (control.right > strip.right - inset) {
+        previewStrip.scrollLeft += control.right - (strip.right - inset);
+      }
+    }
+
     // The same 分割线 in the rebuilt preview: ＋ after 合并, × after 拆回
     function restoreDividerFocus() {
       if (shadow.activeElement === previewStrip && focusedDivider !== null) {
@@ -945,13 +961,16 @@
     // Disable a control without stranding keyboard focus on it
     function setDisabledKeepingFocus(el, disabled, fallback = dialogEl) {
       if (disabled && shadow.activeElement === el) {
-        if (previewStrip.contains(el)) {
-          parkDividerFocus();
-        } else {
-          (fallback.disabled ? dialogEl : fallback).focus();
-        }
+        (fallback.disabled ? dialogEl : fallback).focus();
       }
       el.disabled = disabled;
+    }
+
+    function setDividerDisabled(control, disabled) {
+      if (disabled && shadow.activeElement === control) {
+        parkDividerFocus();
+      }
+      control.disabled = disabled;
     }
 
     // Merge / 拆回 / 清除合并 controls follow the merges, the split mode and the slice-control lock
@@ -961,15 +980,12 @@
       // Controls left on a stale 自由 preview after switching to 左右等分 must not stay usable
       const locked = areSliceControlsLocked() || splitMode !== 'free';
       for (const btn of previewStrip.querySelectorAll('.slice-divider')) {
-        setDisabledKeepingFocus(
-          btn,
-          locked || atMinimum || mergedDividers.has(Number(btn.getAttribute('data-divider')))
-        );
+        setDividerDisabled(btn, locked || atMinimum || mergedDividers.has(Number(btn.getAttribute('data-divider'))));
         btn.title = atMinimum ? `至少保留 ${MIN_SLICE_COUNT} 张切片，无法继续合并` : '合并相邻两张切片';
       }
       // A line already split back while the preview regenerates has nothing left to undo
       for (const line of previewStrip.querySelectorAll('.merged-divider')) {
-        setDisabledKeepingFocus(line, locked || !mergedDividers.has(Number(line.getAttribute('data-divider'))));
+        setDividerDisabled(line, locked || !mergedDividers.has(Number(line.getAttribute('data-divider'))));
       }
       clearMergesBtn.hidden = splitMode !== 'free';
       // After 清除合并 focus moves to the 自由 button beside it
@@ -1233,8 +1249,8 @@
 
     // Keyboard 合并: Delete / Backspace on a focused ×. Enter / Space keep native activation (× 合并, ＋ 拆回);
     // a held key must not repeat on the control focus lands on after the rebuild and undo itself
-    function handleDividerKeyDown(event) {
-      const control = event.target.closest('.slice-divider, .merged-divider');
+    function handleDividerKeyDown(event, target) {
+      const control = target.closest('.slice-divider, .merged-divider');
       if (!control || !['Delete', 'Backspace', 'Enter', ' '].includes(event.key)) return;
       const isMergeKey = event.key === 'Delete' || event.key === 'Backspace';
       if (isMergeKey || event.repeat) event.preventDefault();
@@ -1765,46 +1781,54 @@
       ).filter((el) => !el.hidden && !el.closest('[hidden]'));
     }
 
-    function stopHostKeyLeak(event) {
-      event.stopPropagation();
+    // Tab from the strip parked mid-rebuild continues from 分割线 k, as if its control still had focus
+    function besideParkedDivider(focusables, backward) {
+      const isAfter = (el) =>
+        previewStrip.contains(el)
+          ? Number(el.getAttribute('data-divider')) > focusedDivider
+          : Boolean(previewStrip.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
+      return backward
+        ? (focusables.findLast((el) => !isAfter(el)) ?? focusables.at(-1))
+        : (focusables.find(isAfter) ?? focusables[0]);
     }
 
-    function handleDocumentKeyDown(event) {
-      if (isClosed) return;
+    function handleTab(event) {
+      const focusables = getFocusableElements();
+      const active = shadow.activeElement;
+      // The dialog itself (e.g. after a click on its text) is outside the ring like the page is
+      const offRing = active === dialogEl || !dialogEl.contains(active);
+      let target = null;
+      if (focusables.length === 0) {
+        target = dialogEl;
+      } else if (active === previewStrip && focusedDivider !== null) {
+        target = besideParkedDivider(focusables, event.shiftKey);
+      } else if (event.shiftKey) {
+        if (offRing || active === focusables[0]) target = focusables.at(-1);
+      } else if (offRing || active === focusables.at(-1)) {
+        target = focusables[0];
+      }
+      if (target) {
+        event.preventDefault();
+        target.focus();
+      }
+    }
 
+    // Every key event while the window is open, from key-shield.js (which keeps them all away from X)
+    function handleKey(event) {
+      if (isClosed || event.type !== 'keydown') return;
+      const target = event.composedPath()[0];
       if (event.key === 'Escape') {
         event.preventDefault();
-        event.stopPropagation();
         if (!isSubmitting) {
           close();
         }
-        return;
-      }
-      if (event.key === 'Tab') {
-        event.stopPropagation();
-        const focusables = getFocusableElements();
-        if (focusables.length === 0) {
-          event.preventDefault();
-          dialogEl.focus();
-          return;
-        }
-        const first = focusables[0];
-        const last = focusables[focusables.length - 1];
-        const active = shadow.activeElement;
-        if (event.shiftKey) {
-          if (active === first || !dialogEl.contains(active)) {
-            event.preventDefault();
-            last.focus();
-          }
-        } else if (active === last || !dialogEl.contains(active)) {
-          event.preventDefault();
-          first.focus();
-        }
-        return;
-      }
-
-      if (event.target !== host && !host.contains(event.target)) {
-        event.stopPropagation();
+      } else if (event.key === 'Tab') {
+        handleTab(event);
+      } else if (target === sliceCountInput && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
+        event.preventDefault();
+        stepSliceCount(event.key === 'ArrowUp' ? 1 : -1);
+      } else if (previewStrip.contains(target)) {
+        handleDividerKeyDown(event, target);
       }
     }
 
@@ -1884,10 +1908,9 @@
       pendingGeneration = null;
       abortActiveTask();
       stopTargetWatch();
-      document.removeEventListener('keydown', handleDocumentKeyDown, true);
-      host.removeEventListener('keydown', stopHostKeyLeak);
-      host.removeEventListener('keyup', stopHostKeyLeak);
-      host.removeEventListener('keypress', stopHostKeyLeak);
+      if (XSlicer.slicerKeyHandler === handleKey) {
+        XSlicer.slicerKeyHandler = null;
+      }
       clearRetainedDownload();
       retainedSourceFile = null;
       if (inComposerSource) {
@@ -1913,15 +1936,6 @@
         handleSliceCountChange();
       }
     });
-    sliceCountInput.addEventListener('keydown', (event) => {
-      if (event.key === 'ArrowUp') {
-        event.preventDefault();
-        stepSliceCount(1);
-      } else if (event.key === 'ArrowDown') {
-        event.preventDefault();
-        stepSliceCount(-1);
-      }
-    });
     decreaseBtn.addEventListener('click', () => stepSliceCount(-1));
     increaseBtn.addEventListener('click', () => stepSliceCount(1));
     for (const btn of presetBtns) {
@@ -1945,7 +1959,7 @@
     for (const btn of modeBtns) {
       btn.addEventListener('click', () => setSplitMode(btn.getAttribute('data-split-mode')));
     }
-    previewStrip.addEventListener('keydown', handleDividerKeyDown);
+    previewStrip.addEventListener('focusin', revealFocusedDivider);
     clearMergesBtn.addEventListener('click', clearMerges);
     downloadRetainedBtn.addEventListener('click', handleDownloadRetainedSource);
     closeBtn.addEventListener('click', close);
@@ -1956,10 +1970,7 @@
         close();
       }
     });
-    host.addEventListener('keydown', stopHostKeyLeak);
-    host.addEventListener('keyup', stopHostKeyLeak);
-    host.addEventListener('keypress', stopHostKeyLeak);
-    document.addEventListener('keydown', handleDocumentKeyDown, true);
+    XSlicer.slicerKeyHandler = handleKey;
 
     renderSplitMode();
     if (initialError) {

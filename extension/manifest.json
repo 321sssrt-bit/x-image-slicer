@@ -19,6 +19,16 @@
         "https://twitter.com/*"
       ],
       "js": [
+        "src/key-shield.js"
+      ],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://x.com/*",
+        "https://twitter.com/*"
+      ],
+      "js": [
         "src/preferences.js",
         "src/image-processor.js",
         "src/composer-adapter.js",
