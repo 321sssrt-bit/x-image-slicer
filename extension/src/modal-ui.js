@@ -339,7 +339,9 @@
       /* Never squeeze the cards: a shrunk strip clips their tops (and the 拆回 lines); let .body scroll instead */
       flex: 0 0 auto;
       display: flex;
-      align-items: flex-end;
+      /* Equal-height cards, frames on top: frames stay in one row and 分割线 span exactly the cards even when only
+         some cards carry a 轮播裁边 note */
+      align-items: stretch;
       gap: 10px;
       overflow-x: auto;
       padding: 12px;
@@ -354,7 +356,8 @@
     .preview-strip[data-split-mode="free"] {
       gap: 0;
     }
-    .preview-strip[aria-busy="true"] .slice-card {
+    .preview-strip[aria-busy="true"] .slice-card,
+    .carousel-crop-summary[aria-busy="true"] {
       opacity: 0.45;
       filter: grayscale(1);
     }
@@ -490,6 +493,39 @@
       height: 100%;
       object-fit: contain;
     }
+    /* 轮播裁边: the part of the slice X's carousel crops away, centred, half on each side */
+    .carousel-crop-edge {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      pointer-events: none;
+      background: repeating-linear-gradient(135deg, rgba(15, 20, 25, 0.62) 0 4px, rgba(15, 20, 25, 0.38) 4px 8px);
+    }
+    .carousel-crop-left {
+      left: 0;
+      border-right: 1px solid #fdb022;
+    }
+    .carousel-crop-right {
+      right: 0;
+      border-left: 1px solid #fdb022;
+    }
+    .carousel-crop-note {
+      font-size: 11px;
+      font-weight: 600;
+      color: #b54708;
+      text-align: center;
+      line-height: 1.35;
+      /* One text node broken over two lines, so screen readers read it as one phrase */
+      white-space: pre-line;
+    }
+    .carousel-crop-summary {
+      font-size: 13px;
+      line-height: 1.5;
+      color: #b54708;
+    }
+    .carousel-crop-summary[hidden] {
+      display: none;
+    }
     .slice-meta {
       font-size: 11px;
       color: #536471;
@@ -562,7 +598,7 @@
     initialError,
     onClose
   }) {
-    const { imageProcessor, composerAdapter, preferences } = XSlicer;
+    const { imageProcessor, composerAdapter, preferences, carouselCrop } = XSlicer;
     const {
       MIN_SLICE_COUNT,
       MAX_SLICE_COUNT,
@@ -693,12 +729,13 @@
           </p>
           <div class="status" role="status" aria-live="polite" data-tone="neutral"></div>
           <div class="summary" hidden></div>
+          <div class="carousel-crop-summary" id="xslicer-carousel-crop-summary" hidden></div>
           <div class="preview-strip" aria-label="切片预览列表" tabindex="-1" hidden></div>
         </div>
         <div class="footer">
           <button type="button" class="btn btn-secondary" data-action="download-retained-source" hidden>下载保留的来源原图</button>
           <button type="button" class="btn btn-secondary" data-action="cancel">取消</button>
-          <button type="button" class="btn btn-primary" data-action="submit" disabled>${isReplaceMode ? '确认替换并填入发帖框' : '填入发帖框'}</button>
+          <button type="button" class="btn btn-primary" data-action="submit" aria-describedby="xslicer-carousel-crop-summary" disabled>${isReplaceMode ? '确认替换并填入发帖框' : '填入发帖框'}</button>
         </div>
       </div>
     `;
@@ -724,6 +761,7 @@
     const sliceBadge = shadow.querySelector('.slice-badge');
     const statusEl = shadow.querySelector('.status');
     const summaryEl = shadow.querySelector('.summary');
+    const cropSummaryEl = shadow.querySelector('.carousel-crop-summary');
     const previewStrip = shadow.querySelector('.preview-strip');
 
     let activeTaskToken = 0;
@@ -760,6 +798,12 @@
         return '< 0.1%';
       }
       return `${pct.toFixed(1)}%`;
+    }
+
+    // Never 0% or 100%: some of the slice is cut and some still shows
+    function describeCrop(crop) {
+      const pct = Math.round(crop * 100);
+      return pct < 1 ? '左右裁掉不足 1%' : `左右约裁掉 ${Math.min(pct, 99)}%`;
     }
 
     function abortActiveTask() {
@@ -833,6 +877,8 @@
       previewStrip.hidden = true;
       summaryEl.textContent = '';
       summaryEl.hidden = true;
+      cropSummaryEl.textContent = '';
+      cropSummaryEl.hidden = true;
       submitBtn.disabled = true;
     }
 
@@ -1002,6 +1048,7 @@
       submitBtn.disabled = true;
       if (!previewStrip.hidden) {
         previewStrip.setAttribute('aria-busy', 'true');
+        cropSummaryEl.setAttribute('aria-busy', 'true');
       }
     }
 
@@ -1160,8 +1207,19 @@
       summaryEl.hidden = false;
 
       // One frame height for the whole group so merged (wider) slices still line up as a continuous strip
-      const maxRatio = Math.max(...result.slices.map((s) => s.width / s.height));
+      const ratios = result.slices.map((s) => s.width / s.height);
+      const maxRatio = Math.max(...ratios);
       const frameHeight = 150 * maxRatio > 220 ? Math.max(8, Math.round(220 / maxRatio)) : 150;
+
+      // 轮播裁边 hint only: it never blocks merging or filling and never changes the slices
+      const cropFractions = carouselCrop.carouselCropFractions(ratios);
+      const croppedNumbers = cropFractions.flatMap((crop, i) => (crop > 0 ? [i + 1] : []));
+      cropSummaryEl.textContent =
+        croppedNumbers.length > 0
+          ? `按 X 网页端多图轮播，第 ${croppedNumbers.join('、')} 张切片会被居中裁掉左右边缘（预览中已标出被裁区域）。仅作提示，不影响合并或填入。`
+          : '';
+      cropSummaryEl.hidden = croppedNumbers.length === 0;
+      cropSummaryEl.removeAttribute('aria-busy');
 
       const merged = new Set(result.mergedDividers);
       const keptDividers = [];
@@ -1189,6 +1247,16 @@
         img.src = url;
         img.alt = `${slice.fileName} (${slice.width}×${slice.height})`;
         frame.appendChild(img);
+
+        // Before the 拆回 lines, so they stay on top of the marked edges
+        if (cropFractions[i] > 0) {
+          for (const side of ['left', 'right']) {
+            const edge = document.createElement('div');
+            edge.className = `carousel-crop-edge carousel-crop-${side}`;
+            edge.style.width = `${cropFractions[i] * 50}%`;
+            frame.appendChild(edge);
+          }
+        }
 
         // A merged slice spans 等分 regions start..end; mark each original 分割线 inside it for 拆回
         if (splitMode === 'free') {
@@ -1228,6 +1296,12 @@
         `;
 
         card.append(frame, meta);
+        if (cropFractions[i] > 0) {
+          const cropNote = document.createElement('div');
+          cropNote.className = 'carousel-crop-note';
+          cropNote.textContent = `按 X 网页端，\n${describeCrop(cropFractions[i])}`;
+          card.appendChild(cropNote);
+        }
         previewStrip.appendChild(card);
 
         if (splitMode === 'free' && i < result.slices.length - 1) {

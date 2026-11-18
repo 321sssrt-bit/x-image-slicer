@@ -6593,6 +6593,306 @@ async function runTests() {
       }
     });
 
+    await runCase('29_carousel_crop_hints_equal_and_free_split_and_fill', async (page) => {
+      try {
+        const entryBtn = page.locator('#inline-composer button[data-x-slicer-entry="true"]');
+        const mergeBtn = (modal, left) => modal.host.getByRole('button', { name: `合并第 ${left} 张与第 ${left + 1} 张切片` });
+        const resetComposer = () =>
+          page.evaluate(() => {
+            document.querySelector('#inline-composer [data-testid="attachments"]').innerHTML = '';
+            document.querySelector('#inline-composer [data-x-slicer-feedback="true"]')?.remove();
+            window.__mockX.clearSubmissions();
+            window.__mockX.setComposerText('inline', '');
+          });
+        // Per card: the 轮播裁边 hint text (null when none) and the marked left / right edges as fractions of the frame
+        const cropHints = (modal) =>
+          modal.cards.evaluateAll((cards) =>
+            cards.map((c) => {
+              const frame = c.querySelector('.slice-frame').getBoundingClientRect();
+              const edges = [...c.querySelectorAll('.carousel-crop-edge')].map((e) => {
+                const r = e.getBoundingClientRect();
+                return { left: (r.left - frame.left) / frame.width, width: r.width / frame.width };
+              });
+              return { note: c.querySelector('.carousel-crop-note')?.textContent ?? null, edges };
+            })
+          );
+        const none = { note: null, edges: [] };
+        // Expected hint for a card cut by `pct` percent in total (half on each side), within 1 px of a ~150 px frame
+        const assertCropped = (hint, pct, label) => {
+          assert.equal(hint.note, `按 X 网页端，\n左右约裁掉 ${pct}%`, label);
+          assert.equal(hint.edges.length, 2, `${label}: both edges marked`);
+          const [left, right] = [...hint.edges].sort((a, b) => a.left - b.left);
+          assert.ok(Math.abs(left.left) < 0.01, `${label}: left edge starts at the frame edge`);
+          assert.ok(Math.abs(right.left + right.width - 1) < 0.01, `${label}: right edge ends at the frame edge`);
+          for (const edge of [left, right]) {
+            assert.ok(Math.abs(edge.width - pct / 200) < 0.01, `${label}: each edge marks half the cut (${edge.width})`);
+          }
+        };
+
+        // 29a. 左右等分 2 张 of 300×100: two 1.5:1 slices. X shows them at 0.68W high, capped at 0.8W wide,
+        // so each loses 1 − 0.8 / 1.02 ≈ 22% (the 2-image sample in docs/discovery.md, both cut to 1.178:1)
+        const wide = createPatternPng(300, 100);
+        const widePath = writeTempFile(tmpDir, 'carousel-300x100.png', wide.buffer);
+        await resetComposer();
+        await entryBtn.click();
+        let modal = await getModalLocators(page);
+        await modal.sliceCountInput.fill('2');
+        await modal.fileInput.setInputFiles(widePath);
+        await waitForSlicePreview(page, 2);
+        let hints = await cropHints(modal);
+        assertCropped(hints[0], 22, '29a slice 1');
+        assertCropped(hints[1], 22, '29a slice 2');
+        assert.equal(
+          await modal.host.locator('.carousel-crop-summary').textContent(),
+          '按 X 网页端多图轮播，第 1、2 张切片会被居中裁掉左右边缘（预览中已标出被裁区域）。仅作提示，不影响合并或填入。'
+        );
+        // Screen readers hear it on 填入发帖框, where the user decides
+        assert.equal(
+          await modal.submitBtn.evaluate((b) => b.getRootNode().getElementById(b.getAttribute('aria-describedby'))?.textContent),
+          '按 X 网页端多图轮播，第 1、2 张切片会被居中裁掉左右边缘（预览中已标出被裁区域）。仅作提示，不影响合并或填入。'
+        );
+
+        // An invalid count clears the preview, and the hints go with it
+        await modal.sliceCountInput.fill('25');
+        assert.equal(await modal.cards.count(), 0);
+        assert.equal(await modal.host.locator('.carousel-crop-summary').isVisible(), false);
+
+        // 3 张 of the same image are 1:1: X keeps 0.68W and 0.68W < 0.8W, so nothing is cropped and no hint shows
+        await modal.sliceCountInput.fill('3');
+        await waitForSlicePreview(page, 3);
+        assert.deepEqual(await cropHints(modal), [none, none, none]);
+        assert.equal(await modal.host.locator('.carousel-crop-summary').isVisible(), false);
+
+        // Back to 2 张: the hints return, and 填入发帖框 still goes through with them showing
+        await modal.decreaseBtn.click();
+        await waitForSlicePreview(page, 2);
+        hints = await cropHints(modal);
+        assertCropped(hints[0], 22, '29a slice 1 after 3 → 2');
+        assertCropped(hints[1], 22, '29a slice 2 after 3 → 2');
+        await modal.submitBtn.click();
+        await waitForComposerFeedback(page, '#inline-composer', 'success', /已填入 2 张切片，等待发布/);
+        const st29a = await page.evaluate(() => window.__mockX.getState());
+        assert.equal(st29a.publishClicks.length, 0);
+        assert.equal(st29a.submissions.length, 1);
+        reassembleAndVerifyPngSlices(
+          st29a.submissions[0].files.map((f) => Buffer.from(f.bytes)),
+          wide.rgba,
+          300,
+          100,
+          [150, 150]
+        );
+
+        // 29b. The wording never says 0% or 100%. 2 张 of 236×100 are 1.18:1: 0.68W × 1.18 = 0.8024W, so each loses
+        // only 0.3%. 2 张 of 500×1 are 250:1: each loses 1 − 0.8 / 170 = 99.5% yet still shows a sliver
+        await resetComposer();
+        await entryBtn.click();
+        modal = await getModalLocators(page);
+        await modal.sliceCountInput.fill('2');
+        await modal.fileInput.setInputFiles(writeTempFile(tmpDir, 'carousel-236x100.png', createPatternPng(236, 100).buffer));
+        await waitForSlicePreview(page, 2);
+        hints = await cropHints(modal);
+        assert.deepEqual(hints.map((h) => [h.note, h.edges.length]), Array(2).fill(['按 X 网页端，\n左右裁掉不足 1%', 2]));
+        await modal.fileInput.setInputFiles(writeTempFile(tmpDir, 'carousel-500x1.png', createPatternPng(500, 1).buffer));
+        await waitForSlicePreview(page, 2);
+        hints = await cropHints(modal);
+        assert.deepEqual(hints.map((h) => h.note), Array(2).fill('按 X 网页端，\n左右约裁掉 99%'));
+
+        // 8 张 of 197×80: narrow 0.3:1 slices. X grows the box until the 1st slice plus 67% of the 2nd would fill W
+        // (1.96W) but stops at its 1.24446W cap, and every card stays under 0.8W, so no slice is cropped
+        const narrow = createPatternPng(197, 80);
+        await modal.sliceCountInput.fill('8');
+        await modal.fileInput.setInputFiles(writeTempFile(tmpDir, 'carousel-197x80.png', narrow.buffer));
+        await waitForSlicePreview(page, 8);
+        assert.deepEqual(await cropHints(modal), Array(8).fill(none));
+        assert.equal(await modal.host.locator('.carousel-crop-summary').isVisible(), false);
+        // Merging 等分 regions 3..6 (98 px, 1.225:1) at that capped 1.24446W loses 1 − 0.8 / 1.5245 ≈ 48%
+        // (it would be 67% if the box grew on to 1.96W)
+        await modal.splitModeBtn('free').click();
+        for (let merges = 1; merges <= 3; merges++) {
+          await mergeBtn(modal, 3).click();
+          await waitForSlicePreview(page, 8 - merges);
+        }
+        hints = await cropHints(modal);
+        assertCropped(hints[2], 48, '29b merged slice 3 under the height cap');
+        assert.deepEqual([...hints.slice(0, 2), ...hints.slice(3)], Array(4).fill(none));
+        await modal.closeBtn.click();
+        await modal.host.waitFor({ state: 'detached' });
+
+        // 29c. 自由切分 of 800×100 at 8 等分: 1:1 slices fit (0.68W < 0.8W). A merged 2:1 slice is capped at 0.8W of
+        // its 1.36W, losing 1 − 0.8 / 1.36 ≈ 41%; the 1:1 ones beside it stay whole
+        const strip = createPatternPng(800, 100);
+        await entryBtn.click();
+        modal = await getModalLocators(page);
+        await modal.splitModeBtn('free').click();
+        await modal.fileInput.setInputFiles(writeTempFile(tmpDir, 'carousel-800x100.png', strip.buffer));
+        await waitForSlicePreview(page, 8);
+        assert.deepEqual(await cropHints(modal), Array(8).fill(none));
+
+        await mergeBtn(modal, 4).click();
+        await waitForSlicePreview(page, 7);
+        hints = await cropHints(modal);
+        assertCropped(hints[3], 41, '29c merged slice 4');
+        assert.deepEqual([...hints.slice(0, 3), ...hints.slice(4)], Array(6).fill(none));
+        assert.match(await modal.host.locator('.carousel-crop-summary').textContent(), /^按 X 网页端多图轮播，第 4 张切片会被/);
+
+        // Merging on with a hint showing works, and the hints follow every merge and 拆回. While the group
+        // regenerates, the old summary is greyed out with the old cards
+        const whileRegenerating = await page.evaluate(() => {
+          const sr = document.querySelector('#x-slicer-modal-host').shadowRoot;
+          sr.querySelector('[aria-label="合并第 1 张与第 2 张切片"]').click();
+          const summary = sr.querySelector('.carousel-crop-summary');
+          return { cardOpacity: getComputedStyle(sr.querySelector('.slice-card')).opacity, summaryOpacity: getComputedStyle(summary).opacity };
+        });
+        assert.deepEqual(whileRegenerating, { cardOpacity: '0.45', summaryOpacity: '0.45' });
+        await waitForSlicePreview(page, 6);
+        assert.equal(await modal.host.locator('.carousel-crop-summary').evaluate((el) => getComputedStyle(el).opacity), '1');
+        hints = await cropHints(modal);
+        assertCropped(hints[0], 41, '29c merged slice 1');
+        assertCropped(hints[2], 41, '29c merged slice 3');
+        assert.deepEqual([hints[1], ...hints.slice(3)], Array(4).fill(none));
+        assert.match(await modal.host.locator('.carousel-crop-summary').textContent(), /第 1、3 张切片会被/);
+        await modal.host.getByRole('button', { name: '沿第 1 条原有分割线拆回第 1 张切片' }).click();
+        await waitForSlicePreview(page, 7);
+        hints = await cropHints(modal);
+        assertCropped(hints[3], 41, '29c slice 4 after 拆回 of slice 1');
+        assert.deepEqual(hints[0], none);
+
+        // 3:1 → 1 − 0.8 / 2.04 ≈ 61%, 4:1 → 1 − 0.8 / 2.72 ≈ 71%
+        await mergeBtn(modal, 4).click();
+        await waitForSlicePreview(page, 6);
+        assertCropped((await cropHints(modal))[3], 61, '29c 3:1 slice 4');
+        await mergeBtn(modal, 4).click();
+        await waitForSlicePreview(page, 5);
+        assertCropped((await cropHints(modal))[3], 71, '29c 4:1 slice 4');
+        // Its first original 分割线 (at 25%) lies inside the marked left edge (35%) and still splits back
+        await modal.host.getByRole('button', { name: '沿第 1 条原有分割线拆回第 4 张切片' }).click();
+        await waitForSlicePreview(page, 6);
+        hints = await cropHints(modal);
+        assertCropped(hints[4], 61, '29c 3:1 slice 5 after 拆回');
+        assert.deepEqual([...hints.slice(0, 4), hints[5]], Array(5).fill(none));
+        await modal.submitBtn.click();
+        await waitForComposerFeedback(page, '#inline-composer', 'success', /已填入 6 张切片，等待发布/);
+        const st29c = await page.evaluate(() => window.__mockX.getState());
+        assert.equal(st29c.publishClicks.length, 0);
+        assert.equal(st29c.submissions.length, 1);
+        reassembleAndVerifyPngSlices(
+          st29c.submissions[0].files.map((f) => Buffer.from(f.bytes)),
+          strip.rgba,
+          800,
+          100,
+          [100, 100, 100, 100, 300, 100]
+        );
+
+        // 29d. 8 等分 of 400×100 (0.5:1): X grows the box until the 1st slice plus 67% of the 2nd fill W, to
+        // 1 / (0.5 + 0.67 × 0.5) ≈ 1.198W. Nothing is cropped until merging the last two: that 1:1 slice would be
+        // 1.198W wide, so it loses 1 − 0.8 / 1.198 ≈ 33% although 1:1 slices fit at the usual 0.68W
+        await resetComposer();
+        await entryBtn.click();
+        modal = await getModalLocators(page);
+        await modal.fileInput.setInputFiles(writeTempFile(tmpDir, 'carousel-400x100.png', createPatternPng(400, 100).buffer));
+        await waitForSlicePreview(page, 8);
+        assert.deepEqual(await cropHints(modal), Array(8).fill(none));
+        await mergeBtn(modal, 7).click();
+        await waitForSlicePreview(page, 7);
+        hints = await cropHints(modal);
+        assertCropped(hints[6], 33, '29d merged last slice');
+        assert.deepEqual(hints.slice(0, 6), Array(6).fill(none));
+
+        // 29e. 6 等分 of 150×100 merged down to 5:1 + 1:1 regions, i.e. 1.25:1 and 0.25:1. X fills the row with the
+        // wide card held at 0.8W and the narrow one taking the remaining 0.2W, which sets the height to
+        // 0.2 / 0.25 = 0.8W: the wide card loses 1 − 0.8 / (0.8 × 1.25) = 20%
+        await modal.sliceCountInput.fill('6');
+        await modal.fileInput.setInputFiles(writeTempFile(tmpDir, 'carousel-150x100.png', createPatternPng(150, 100).buffer));
+        await waitForSlicePreview(page, 6);
+        for (let merges = 1; merges <= 4; merges++) {
+          await mergeBtn(modal, 1).click();
+          await waitForSlicePreview(page, 6 - merges);
+        }
+        hints = await cropHints(modal);
+        assertCropped(hints[0], 20, '29e wide slice');
+        assert.deepEqual(hints[1], none);
+
+        // 4 等分 of 160×100 merged to 1.2:1 + 0.4:1. At 0.68W the wide card would lose 2%, but the 2nd card already
+        // shows enough there (0.2W of 0.27W), so X uses the lower side-by-side row, 1 / 1.6 = 0.625W high, where the
+        // wide card is 0.75W and nothing is cropped
+        await modal.sliceCountInput.fill('4');
+        await modal.fileInput.setInputFiles(writeTempFile(tmpDir, 'carousel-160x100.png', createPatternPng(160, 100).buffer));
+        await waitForSlicePreview(page, 4);
+        for (let merges = 1; merges <= 2; merges++) {
+          await mergeBtn(modal, 1).click();
+          await waitForSlicePreview(page, 4 - merges);
+        }
+        assert.deepEqual(await cropHints(modal), [none, none]);
+
+        // 10 等分 of 250×100 (0.25:1 regions) merged to 1 + 4 + 5 regions, i.e. 0.25:1, 1:1, 1.25:1. At 0.68W the 2nd
+        // card shows whole, so the box grows toward the 67% peek, which needs the 2nd card held at 0.8W; X stops
+        // growing where the 2nd card reaches 0.8W, at 0.8W high. The 3rd card is then 1W wide and loses 20%
+        await modal.sliceCountInput.fill('10');
+        await modal.fileInput.setInputFiles(writeTempFile(tmpDir, 'carousel-250x100.png', createPatternPng(250, 100).buffer));
+        await waitForSlicePreview(page, 10);
+        const mergeInto = async (left, times, from) => {
+          for (let m = 1; m <= times; m++) {
+            await mergeBtn(modal, left).click();
+            await waitForSlicePreview(page, from - m);
+          }
+        };
+        await mergeInto(2, 3, 10);
+        await mergeInto(3, 4, 7);
+        hints = await cropHints(modal);
+        assertCropped(hints[2], 20, '29e 1.25:1 after 0.25:1 + 1:1');
+        assert.deepEqual(hints.slice(0, 2), [none, none]);
+        // 清除合并 drops the hints with the merges
+        await modal.clearMergesBtn.click();
+        await waitForSlicePreview(page, 10);
+        assert.deepEqual(await cropHints(modal), Array(10).fill(none));
+        // 4 + 1 + 5 regions, i.e. 1:1, 0.25:1, 1.25:1: here the peek needs the 1st card held at 0.8W, and X again
+        // stops at 0.8W high, where the 1st card reaches 0.8W: the 3rd card loses 20%
+        await mergeInto(1, 3, 10);
+        await mergeInto(3, 4, 7);
+        hints = await cropHints(modal);
+        assertCropped(hints[2], 20, '29e 1.25:1 after 1:1 + 0.25:1');
+        assert.deepEqual(hints.slice(0, 2), [none, none]);
+        await modal.closeBtn.click();
+        await modal.host.waitFor({ state: 'detached' });
+
+        // 29f. 框内切图: the hints show for the composer's own image too, and 确认替换并填入发帖框 still completes
+        await resetComposer();
+        await page.evaluate(() => {
+          window.__mockX.setComposerText('inline', '轮播裁边框内切图');
+          window.__mockX.configureUserSingleUpload('inline', {});
+        });
+        await page.locator('#inline-composer input[type="file"][data-testid="fileInput"]').setInputFiles(widePath);
+        await page.waitForSelector('#inline-composer [data-testid="attachmentItem"] img');
+        await entryBtn.click();
+        modal = await getModalLocators(page);
+        await waitForSlicePreview(page, 8);
+        await modal.sliceCountInput.fill('2');
+        await waitForSlicePreview(page, 2);
+        hints = await cropHints(modal);
+        assertCropped(hints[0], 22, '29f slice 1');
+        assertCropped(hints[1], 22, '29f slice 2');
+        assert.equal(await modal.submitBtn.textContent(), '确认替换并填入发帖框');
+        await modal.submitBtn.click();
+        await waitForComposerFeedback(page, '#inline-composer', 'success', /已填入 2 张切片（已替换原附件），等待发布/);
+        const st29f = await page.evaluate(() => window.__mockX.getState());
+        assert.equal(st29f.publishClicks.length, 0);
+        assert.equal(st29f.submissions.length, 1);
+        assert.equal(
+          await page.locator('#inline-composer [data-testid="tweetTextarea_0"]').textContent(),
+          '轮播裁边框内切图'
+        );
+        reassembleAndVerifyPngSlices(
+          st29f.submissions[0].files.map((f) => Buffer.from(f.bytes)),
+          wide.rgba,
+          300,
+          100,
+          [150, 150]
+        );
+      } finally {
+        await evaluateInExtensionWorld(page, `chrome.storage.local.clear()`);
+      }
+    });
+
     assert.equal(
       unexpectedRequests.length,
       0,

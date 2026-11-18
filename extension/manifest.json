@@ -32,6 +32,7 @@
         "src/preferences.js",
         "src/image-processor.js",
         "src/composer-adapter.js",
+        "src/carousel-crop.js",
         "src/modal-ui.js",
         "src/content.js"
       ],
