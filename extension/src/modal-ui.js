@@ -809,7 +809,7 @@
     // The same 分割线 in the rebuilt preview: ＋ after 合并, × after 拆回
     function restoreDividerFocus() {
       if (shadow.activeElement === previewStrip && focusedDivider !== null) {
-        previewStrip.querySelector(`[data-divider="${focusedDivider}"]:not(:disabled)`)?.focus();
+        previewStrip.querySelector(`[data-divider="${focusedDivider}"]`)?.focus();
       }
       focusedDivider = null;
     }
@@ -959,7 +959,7 @@
     }
 
     // Disable a control without stranding keyboard focus on it
-    function setDisabledKeepingFocus(el, disabled, fallback = dialogEl) {
+    function setDisabledKeepingFocus(el, disabled, fallback) {
       if (disabled && shadow.activeElement === el) {
         (fallback.disabled ? dialogEl : fallback).focus();
       }
@@ -1787,9 +1787,7 @@
         previewStrip.contains(el)
           ? Number(el.getAttribute('data-divider')) > focusedDivider
           : Boolean(previewStrip.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
-      return backward
-        ? (focusables.findLast((el) => !isAfter(el)) ?? focusables.at(-1))
-        : (focusables.find(isAfter) ?? focusables[0]);
+      return backward ? focusables.findLast((el) => !isAfter(el)) : focusables.find(isAfter);
     }
 
     function handleTab(event) {
@@ -1815,7 +1813,7 @@
 
     // Every key event while the window is open, from key-shield.js (which keeps them all away from X)
     function handleKey(event) {
-      if (isClosed || event.type !== 'keydown') return;
+      if (event.type !== 'keydown') return;
       const target = event.composedPath()[0];
       if (event.key === 'Escape') {
         event.preventDefault();
