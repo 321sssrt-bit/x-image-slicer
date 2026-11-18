@@ -72,7 +72,8 @@
     .stepper-btn:focus-visible,
     .preset-btn:focus-visible,
     .mode-btn:focus-visible,
-    .clear-merges-btn:focus-visible {
+    .clear-merges-btn:focus-visible,
+    .preview-strip:focus-visible {
       outline: 2px solid #1d9bf0;
       outline-offset: 2px;
     }
@@ -686,11 +687,11 @@
             </div>
           </div>
           <p class="hint">
-            支持单张静态位图（PNG / JPEG / WebP / BMP / 静态 GIF / 静态 AVIF，原图总像素 ≤ 500,000,000，支持 4 亿像素高解析大图）。每次打开默认 8 张（推荐 5 / 8 / 20 张，可调整为 2～20 的整数）；修改张数将清空合并并从原图重新切分；自由切分下点击相邻切片之间分割线上的 × 可合并两侧切片（至少保留 2 张），点击合并后切片内虚线上的 ＋ 可沿原有分割线拆回，「清除合并」可一键恢复纯等分，每次合并或拆回都从原图重新生成整组切片。大图将自动按整组统一比例缩小并优化至每片长边 ≤ 4096 px、体积 ≤ 4.5 MB（透明图保留 PNG 透明背景），处理期间可随时取消或关闭。
+            支持单张静态位图（PNG / JPEG / WebP / BMP / 静态 GIF / 静态 AVIF，原图总像素 ≤ 500,000,000，支持 4 亿像素高解析大图）。每次打开默认 8 张（推荐 5 / 8 / 20 张，可调整为 2～20 的整数）；修改张数将清空合并并从原图重新切分；自由切分下点击相邻切片之间分割线上的 ×（或用 Tab 聚焦后按 Delete / Backspace）可合并两侧切片（至少保留 2 张），点击合并后切片内虚线上的 ＋（或聚焦后按 Enter）可沿原有分割线拆回，「清除合并」可一键恢复纯等分，每次合并或拆回都从原图重新生成整组切片。大图将自动按整组统一比例缩小并优化至每片长边 ≤ 4096 px、体积 ≤ 4.5 MB（透明图保留 PNG 透明背景），处理期间可随时取消或关闭。
           </p>
           <div class="status" role="status" aria-live="polite" data-tone="neutral"></div>
           <div class="summary" hidden></div>
-          <div class="preview-strip" aria-label="切片预览列表" hidden></div>
+          <div class="preview-strip" aria-label="切片预览列表" tabindex="-1" hidden></div>
         </div>
         <div class="footer">
           <button type="button" class="btn btn-secondary" data-action="download-retained-source" hidden>下载保留的来源原图</button>
@@ -716,6 +717,7 @@
     const increaseBtn = shadow.querySelector('[data-action="increase-count"]');
     const presetBtns = Array.from(shadow.querySelectorAll('[data-action="preset-count"]'));
     const modeBtns = Array.from(shadow.querySelectorAll('[data-action="split-mode"]'));
+    const freeModeBtn = shadow.querySelector('[data-split-mode="free"]');
     const clearMergesBtn = shadow.querySelector('[data-action="clear-merges"]');
     const sliceBadge = shadow.querySelector('.slice-badge');
     const statusEl = shadow.querySelector('.status');
@@ -740,6 +742,8 @@
     // 自由切分 merges for the current 原图 and 等分张数 N: 分割线 k sits between 等分 regions k-1 and k
     const mergedDividers = new Set();
     let currentResultPlanKey = null;
+    // 分割线 k whose control had focus when it was disabled or rebuilt: focus follows k into the new preview
+    let focusedDivider = null;
     let splitMode = initialSplitMode;
     let targetWatchObserver = null;
     let targetWatchTimer = null;
@@ -778,10 +782,20 @@
       objectUrls = [];
     }
 
-    function moveFocusOffPreview() {
-      if (previewStrip.contains(shadow.activeElement)) {
-        dialogEl.focus();
+    // Park focus on the (busy) strip, not the page, while the focused 分割线 control is disabled or rebuilt
+    function parkDividerFocus() {
+      const active = shadow.activeElement;
+      if (active === previewStrip || !previewStrip.contains(active)) return;
+      focusedDivider = Number(active.getAttribute('data-divider'));
+      previewStrip.focus();
+    }
+
+    // The same 分割线 in the rebuilt preview: ＋ after 合并, × after 拆回
+    function restoreDividerFocus() {
+      if (shadow.activeElement === previewStrip && focusedDivider !== null) {
+        previewStrip.querySelector(`[data-divider="${focusedDivider}"]:not(:disabled)`)?.focus();
       }
+      focusedDivider = null;
     }
 
     function clearPreview() {
@@ -794,6 +808,7 @@
           dialogEl.focus();
         }
       }
+      focusedDivider = null;
       revokeObjectUrls();
       currentResult = null;
       currentResultPlanKey = null;
@@ -928,9 +943,13 @@
     }
 
     // Disable a control without stranding keyboard focus on it
-    function setDisabledKeepingFocus(el, disabled) {
+    function setDisabledKeepingFocus(el, disabled, fallback = dialogEl) {
       if (disabled && shadow.activeElement === el) {
-        dialogEl.focus();
+        if (previewStrip.contains(el)) {
+          parkDividerFocus();
+        } else {
+          (fallback.disabled ? dialogEl : fallback).focus();
+        }
       }
       el.disabled = disabled;
     }
@@ -953,7 +972,8 @@
         setDisabledKeepingFocus(line, locked || !mergedDividers.has(Number(line.getAttribute('data-divider'))));
       }
       clearMergesBtn.hidden = splitMode !== 'free';
-      setDisabledKeepingFocus(clearMergesBtn, locked || mergedDividers.size === 0);
+      // After 清除合并 focus moves to the 自由 button beside it
+      setDisabledKeepingFocus(clearMergesBtn, locked || mergedDividers.size === 0, freeModeBtn);
     }
 
     // Keep the old cards visible but greyed and unsubmittable until the latest generation lands
@@ -1096,7 +1116,7 @@
     }
 
     function renderPreview(result) {
-      moveFocusOffPreview();
+      parkDividerFocus();
       revokeObjectUrls();
       previewStrip.innerHTML = '';
       previewStrip.removeAttribute('aria-busy');
@@ -1208,6 +1228,19 @@
 
       previewStrip.hidden = false;
       renderMergeControls();
+      restoreDividerFocus();
+    }
+
+    // Keyboard 合并: Delete / Backspace on a focused ×. Enter / Space keep native activation (× 合并, ＋ 拆回);
+    // a held key must not repeat on the control focus lands on after the rebuild and undo itself
+    function handleDividerKeyDown(event) {
+      const control = event.target.closest('.slice-divider, .merged-divider');
+      if (!control || !['Delete', 'Backspace', 'Enter', ' '].includes(event.key)) return;
+      const isMergeKey = event.key === 'Delete' || event.key === 'Backspace';
+      if (isMergeKey || event.repeat) event.preventDefault();
+      if (isMergeKey && !event.repeat && control.classList.contains('slice-divider')) {
+        mergeDivider(Number(control.getAttribute('data-divider')));
+      }
     }
 
     async function runSliceGeneration(file, plan, token) {
@@ -1912,6 +1945,7 @@
     for (const btn of modeBtns) {
       btn.addEventListener('click', () => setSplitMode(btn.getAttribute('data-split-mode')));
     }
+    previewStrip.addEventListener('keydown', handleDividerKeyDown);
     clearMergesBtn.addEventListener('click', clearMerges);
     downloadRetainedBtn.addEventListener('click', handleDownloadRetainedSource);
     closeBtn.addEventListener('click', close);

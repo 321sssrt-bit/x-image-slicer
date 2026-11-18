@@ -6305,6 +6305,202 @@ async function runTests() {
       }
     });
 
+    // 28. Ticket #5: keyboard-only 自由切分: Tab reaches each 分割线, Delete / Backspace 合并, Enter 拆回, focus follows
+    // the 分割线 through every rebuild, nothing leaks to the X page, and the result is filled with the keyboard
+    await runCase('28_free_split_keyboard_merge_unmerge_focus_and_fill', async (page) => {
+      try {
+        const entryBtn = page.locator('#inline-composer button[data-x-slicer-entry="true"]');
+        const draft = '键盘自由切分保留文案';
+        // 8 等分 of 197 px puts 分割线 1..7 at x = 24, 49, 73, 98, 123, 147, 172
+        const pat = createPatternPng(197, 80);
+        const patPath = writeTempFile(tmpDir, 'keyboard-197x80.png', pat.buffer);
+        const focused = () =>
+          page.evaluate(() => {
+            const host = document.querySelector('#x-slicer-modal-host');
+            const el = host?.shadowRoot?.activeElement;
+            const mark = el?.querySelector('[aria-hidden="true"]');
+            return {
+              inModal: Boolean(host) && document.activeElement === host,
+              label: el ? el.getAttribute('aria-label') || el.textContent.trim() : null,
+              markOpacity: mark ? getComputedStyle(mark).opacity : null
+            };
+          });
+        // Presses (Shift+)Tab until `label` has focus; every stop on the way must stay inside the window
+        const tabTo = async (label, { shift = false, max = 40 } = {}) => {
+          const path = [];
+          for (let i = 0; i < max; i++) {
+            await page.keyboard.press(shift ? 'Shift+Tab' : 'Tab');
+            const f = await focused();
+            assert.equal(f.inModal, true, `Tab left the window after ${path.join(' → ')}`);
+            path.push(f.label);
+            if (f.label === label) return path;
+          }
+          throw new Error(`Tab never reached ${label}: ${path.join(' → ')}`);
+        };
+        const sliceCount = () =>
+          page.evaluate(() => document.querySelector('#x-slicer-modal-host').shadowRoot.querySelectorAll('.slice-card').length);
+
+        await page.evaluate((text) => window.__mockX.setComposerText('inline', text), draft);
+        await entryBtn.focus();
+        await page.keyboard.press('Enter');
+        const modal = await getModalLocators(page);
+
+        // Keys that reach the page's own handlers, and any moment focus drops out of the window
+        await page.evaluate(() => {
+          const leaks = (window.__keyLeaks = []);
+          for (const type of ['keydown', 'keypress']) {
+            window.addEventListener(type, (e) => {
+              if (['Delete', 'Backspace', 'Enter', 'Tab', ' '].includes(e.key)) leaks.push(`${type}:${e.key}`);
+            });
+          }
+          const host = document.querySelector('#x-slicer-modal-host');
+          const lost = (window.__focusLost = []);
+          new MutationObserver(() => {
+            if (host.isConnected && document.activeElement !== host) lost.push(document.activeElement?.tagName || 'null');
+          }).observe(host.shadowRoot, { subtree: true, childList: true, attributes: true });
+        });
+
+        // 28a. 自由 by keyboard; Tab then visits every 分割线 left to right (× shown on focus) between the controls and footer
+        await tabTo('自由切分');
+        await page.keyboard.press('Space');
+        assert.equal(await modal.splitModeBtn('free').getAttribute('aria-pressed'), 'true');
+        await modal.fileInput.setInputFiles(patPath);
+        await waitForSlicePreview(page, 8);
+        await modal.presetBtn(20).focus();
+        const forward = await tabTo('填入发帖框');
+        assert.deepEqual(forward, [
+          '合并第 1 张与第 2 张切片',
+          '合并第 2 张与第 3 张切片',
+          '合并第 3 张与第 4 张切片',
+          '合并第 4 张与第 5 张切片',
+          '合并第 5 张与第 6 张切片',
+          '合并第 6 张与第 7 张切片',
+          '合并第 7 张与第 8 张切片',
+          '取消',
+          '填入发帖框'
+        ]);
+        await tabTo('合并第 3 张与第 4 张切片', { shift: true });
+        assert.equal((await focused()).markOpacity, '1', 'A focused 分割线 shows ×');
+
+        // 28b. Delete merges; focus stays on that 分割线, now the ＋ inside the merged card
+        await page.keyboard.press('Delete');
+        await waitForSlicePreview(page, 7);
+        assert.deepEqual(await focused(), { inModal: true, label: '沿第 1 条原有分割线拆回第 3 张切片', markOpacity: '1' });
+        assert.equal(await modal.sliceBadge.textContent(), '8 等分 · 合并后 7 张');
+
+        // 28c. Backspace merges the next 分割线 (4); Enter on ＋ 拆回 分割线 3 and focus lands on its × again
+        assert.deepEqual(await tabTo('合并第 3 张与第 4 张切片'), ['合并第 3 张与第 4 张切片']);
+        await page.keyboard.press('Backspace');
+        await waitForSlicePreview(page, 6);
+        assert.equal((await focused()).label, '沿第 2 条原有分割线拆回第 3 张切片');
+        await tabTo('沿第 1 条原有分割线拆回第 3 张切片', { shift: true });
+        assert.equal((await focused()).markOpacity, '1', 'A focused inner 分割线 shows ＋');
+        // Held Enter: the auto-repeat lands on the restored × and must not merge it straight back
+        await page.keyboard.down('Enter');
+        await waitForSlicePreview(page, 7);
+        assert.deepEqual(await focused(), { inModal: true, label: '合并第 3 张与第 4 张切片', markOpacity: '1' });
+        await page.keyboard.down('Enter');
+        await page.keyboard.up('Enter');
+        await page.waitForTimeout(300);
+        assert.equal(await sliceCount(), 7, 'A repeated Enter must not 合并 again');
+        assert.equal(await modal.sliceBadge.textContent(), '8 等分 · 合并后 7 张');
+        reassembleAndVerifyPngSlices(await readPreviewPngs(modal), pat.rgba, pat.width, pat.height, [24, 25, 24, 50, 24, 25, 25]);
+
+        // 28d. Keyboard merges down to the 2-slice minimum, each landing on the ＋ of the 分割线 just merged
+        const keyboardMerges = [
+          ['Delete', '合并第 3 张与第 4 张切片', false, '沿第 1 条原有分割线拆回第 3 张切片'],
+          ['Delete', '合并第 3 张与第 4 张切片', false, '沿第 3 条原有分割线拆回第 3 张切片'],
+          ['Backspace', '合并第 3 张与第 4 张切片', false, '沿第 4 条原有分割线拆回第 3 张切片'],
+          ['Delete', '合并第 3 张与第 4 张切片', false, '沿第 5 条原有分割线拆回第 3 张切片'],
+          ['Backspace', '合并第 1 张与第 2 张切片', true, '沿第 1 条原有分割线拆回第 1 张切片']
+        ];
+        for (const [i, [key, divider, shift, landsOn]] of keyboardMerges.entries()) {
+          if ((await focused()).label !== divider) await tabTo(divider, { shift });
+          await page.keyboard.press(key);
+          await waitForSlicePreview(page, 6 - i);
+          assert.equal((await focused()).label, landsOn, `${key} on ${divider} (to ${6 - i} slices)`);
+        }
+        assert.equal(await modal.sliceBadge.textContent(), '8 等分 · 合并后 2 张');
+
+        // 28e. At 2 slices the last × is out of the focus ring, and Delete / Backspace on any ＋ change nothing
+        assert.equal(await modal.host.getByRole('button', { name: '合并第 1 张与第 2 张切片' }).isDisabled(), true);
+        const ring = await tabTo('沿第 1 条原有分割线拆回第 1 张切片');
+        assert.equal(ring.filter((label) => label.startsWith('合并第')).length, 0, `× in focus ring: ${ring.join(' → ')}`);
+        for (const line of ['沿第 1 条原有分割线拆回第 1 张切片', '沿第 3 条原有分割线拆回第 2 张切片']) {
+          if ((await focused()).label !== line) await tabTo(line);
+          await page.keyboard.press('Delete');
+          await page.keyboard.press('Backspace');
+        }
+        await page.waitForTimeout(300);
+        assert.equal(await sliceCount(), 2);
+        assert.equal(await modal.status.getAttribute('data-tone'), 'success');
+        assert.equal(await modal.host.locator('.preview-strip').getAttribute('aria-busy'), null);
+        assert.equal(await modal.sliceBadge.textContent(), '8 等分 · 合并后 2 张');
+
+        // 28f. Enter 拆回 分割线 5 back to 3 slices, Tab to 填入发帖框 and Enter fills them
+        await page.keyboard.press('Enter');
+        await waitForSlicePreview(page, 3);
+        assert.equal((await focused()).label, '合并第 2 张与第 3 张切片');
+        await tabTo('填入发帖框');
+        await page.keyboard.press('Enter');
+        await waitForComposerFeedback(page, '#inline-composer', 'success', /已填入 3 张切片，等待发布/);
+        const st = await page.evaluate(() => window.__mockX.getState());
+        assert.equal(st.submissions.length, 1);
+        assert.equal(st.submissions[0].count, 3);
+        reassembleAndVerifyPngSlices(
+          st.submissions[0].files.map((f) => Buffer.from(f.bytes)),
+          pat.rgba,
+          pat.width,
+          pat.height,
+          [49, 74, 74]
+        );
+        const after = await page.evaluate(() => ({
+          text: document.querySelector('#inline-composer [data-testid="tweetTextarea_0"]').textContent,
+          focusOnEntry: document.activeElement === document.querySelector('#inline-composer button[data-x-slicer-entry="true"]'),
+          leaks: window.__keyLeaks,
+          lost: window.__focusLost
+        }));
+        assert.deepEqual(after, { text: draft, focusOnEntry: true, leaks: [], lost: [] });
+
+        // 28g. Escape while a keyboard 合并 regenerates closes cleanly back to the entry button, nothing leaks
+        await page.evaluate(() => {
+          document.querySelector('#inline-composer [data-testid="attachments"]').innerHTML = '';
+          document.querySelector('#inline-composer [data-x-slicer-feedback="true"]')?.remove();
+          window.__mockX.clearSubmissions();
+        });
+        await entryBtn.focus();
+        await page.keyboard.press('Enter');
+        await getModalLocators(page);
+        await page.evaluate(() => (window.__keyLeaks.length = 0));
+        await modal.fileInput.setInputFiles(patPath);
+        await waitForSlicePreview(page, 8);
+        // 清除合并 by keyboard disables itself; focus moves to the 自由 button beside it, not the dialog
+        await tabTo('合并第 1 张与第 2 张切片');
+        await page.keyboard.press('Delete');
+        await waitForSlicePreview(page, 7);
+        await tabTo('清除合并', { shift: true });
+        await page.keyboard.press('Enter');
+        await waitForSlicePreview(page, 8);
+        assert.equal((await focused()).label, '自由切分');
+        await tabTo('合并第 1 张与第 2 张切片');
+        await page.keyboard.press('Delete');
+        await page.keyboard.press('Escape');
+        await modal.host.waitFor({ state: 'detached' });
+        assert.deepEqual(
+          await page.evaluate(() => ({
+            focusOnEntry: document.activeElement === document.querySelector('#inline-composer button[data-x-slicer-entry="true"]'),
+            leaks: window.__keyLeaks,
+            escapes: window.__mockX.getState().pageEscapeEvents,
+            submissions: window.__mockX.getState().submissions.length,
+            text: document.querySelector('#inline-composer [data-testid="tweetTextarea_0"]').textContent
+          })),
+          { focusOnEntry: true, leaks: [], escapes: 0, submissions: 0, text: draft }
+        );
+      } finally {
+        await evaluateInExtensionWorld(page, `chrome.storage.local.clear()`);
+      }
+    });
+
     assert.equal(
       unexpectedRequests.length,
       0,
