@@ -523,9 +523,6 @@
       line-height: 1.5;
       color: #b54708;
     }
-    .carousel-crop-summary[hidden] {
-      display: none;
-    }
     .slice-meta {
       font-size: 11px;
       color: #536471;

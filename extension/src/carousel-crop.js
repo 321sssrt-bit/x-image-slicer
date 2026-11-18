@@ -20,50 +20,50 @@
     return Math.min(height * aspect, MAX_CARD_WIDTH);
   }
 
-  // Height at which the row fills W exactly; the widest cards may stop at 0.8W while the rest fill what is left
-  function fillHeight(aspects) {
-    let uncapped = aspects;
-    let capped = 0;
-    while (uncapped.length > 0) {
-      const height = (1 - capped * MAX_CARD_WIDTH) / uncapped.reduce((sum, a) => sum + a, 0);
-      if (height <= 0) return null;
-      const fits = uncapped.filter((a) => height * a <= MAX_CARD_WIDTH);
-      if (fits.length === uncapped.length) return height;
-      capped += uncapped.length - fits.length;
-      uncapped = fits;
-    }
-    return null;
+  function sum(aspects) {
+    return aspects.reduce((total, a) => total + a, 0);
   }
 
+  // Height at which the row fills W exactly. At most one card can be held at 0.8W (two would need more than the whole
+  // row), and the rest then fill the remaining 0.2W
+  function fillHeight(aspects) {
+    const height = 1 / sum(aspects);
+    const fits = aspects.filter((a) => height * a <= MAX_CARD_WIDTH);
+    return fits.length === aspects.length ? height : (1 - MAX_CARD_WIDTH) / sum(fits);
+  }
+
+  // The 1st card is at most 0.8W wide, so at least 0.2W is left for the 2nd
   function secondVisible(height, [first, second]) {
     const secondWidth = cardWidth(height, second);
-    return Math.min(Math.max(1 - cardWidth(height, first), 0), secondWidth) / secondWidth;
+    return Math.min(1 - cardWidth(height, first), secondWidth) / secondWidth;
   }
 
-  // Lowest height at which the 1st card plus 67% of the 2nd fill W, with either card possibly at 0.8W
+  // Lowest height at which the 1st card plus 67% of the 2nd fill W, with either card possibly at 0.8W (the other one
+  // then always fits). Rounding can drop both candidates at the boundary between two cases, e.g. 4757 px next to
+  // 1775 px at 3 px high: X then keeps the height, so null stays
   function peekHeight([first, second]) {
     const candidates = [];
     const free = 1 / (first + SECOND_PEEK * second);
     if (free * first <= MAX_CARD_WIDTH && free * second <= MAX_CARD_WIDTH) candidates.push(free);
     const firstCapped = (1 - MAX_CARD_WIDTH) / (SECOND_PEEK * second);
-    if (firstCapped * first >= MAX_CARD_WIDTH && firstCapped * second <= MAX_CARD_WIDTH) candidates.push(firstCapped);
+    if (firstCapped * first >= MAX_CARD_WIDTH) candidates.push(firstCapped);
     const secondCapped = (1 - SECOND_PEEK * MAX_CARD_WIDTH) / first;
-    if (secondCapped * second >= MAX_CARD_WIDTH && secondCapped * first <= MAX_CARD_WIDTH) candidates.push(secondCapped);
+    if (secondCapped * second >= MAX_CARD_WIDTH) candidates.push(secondCapped);
     return candidates.length > 0 ? Math.min(...candidates) : null;
   }
 
   function carouselHeight(aspects) {
     let height = BASE_HEIGHT;
     const fill = fillHeight(aspects);
-    if (fill !== null && fill >= height) height = Math.min(fill, MAX_HEIGHT);
+    if (fill >= height) height = Math.min(fill, MAX_HEIGHT);
     if (aspects.length === 2) {
-      if (fill !== null && fill < height && secondVisible(height, aspects) >= MIN_SECOND_VISIBLE) height = fill;
+      if (fill < height && secondVisible(height, aspects) >= MIN_SECOND_VISIBLE) height = fill;
     } else if (1 - secondVisible(height, aspects) < MIN_SECOND_HIDDEN) {
       const peek = peekHeight(aspects);
       if (peek !== null) {
         // Grow, but never past the height at which the 1st or 2nd card reaches 0.8W
         const firstTwoCap = Math.min(MAX_CARD_WIDTH / aspects[0], MAX_CARD_WIDTH / aspects[1]);
-        height = Math.max(height, Math.min(peek, MAX_HEIGHT, Math.max(firstTwoCap, height)));
+        height = Math.max(height, Math.min(peek, MAX_HEIGHT, firstTwoCap));
       }
     }
     return height;
