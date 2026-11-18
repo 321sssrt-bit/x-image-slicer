@@ -58,7 +58,7 @@ async function openMockXPage(context) {
 
 async function createExtensionContext(userDataDir, isCrossOriginMockAllowed) {
   const context = await chromium.launchPersistentContext(userDataDir, {
-    channel: 'chromium',
+    channel: process.env.X_SLICER_CHANNEL || 'chromium',
     headless: true,
     args: [
       `--disable-extensions-except=${EXTENSION_DIR}`,
@@ -6589,6 +6589,60 @@ async function runTests() {
         await page.evaluate(() => {
           document.body.style.minHeight = '';
         });
+        await evaluateInExtensionWorld(page, `chrome.storage.local.clear()`);
+      }
+    });
+
+    await runCase('29_carousel_crop_hints_equal_and_free_split_and_fill', async (page) => {
+      try {
+        const entryBtn = page.locator('#inline-composer button[data-x-slicer-entry="true"]');
+        const mergeBtn = (modal, left) => modal.host.getByRole('button', { name: `合并第 ${left} 张与第 ${left + 1} 张切片` });
+        const resetComposer = () =>
+          page.evaluate(() => {
+            document.querySelector('#inline-composer [data-testid="attachments"]').innerHTML = '';
+            document.querySelector('#inline-composer [data-x-slicer-feedback="true"]')?.remove();
+            window.__mockX.clearSubmissions();
+            window.__mockX.setComposerText('inline', '');
+          });
+        // Per card: the 轮播裁边 hint text (null when none) and the marked left / right edges as fractions of the frame
+        const cropHints = (modal) =>
+          modal.cards.evaluateAll((cards) =>
+            cards.map((c) => {
+              const frame = c.querySelector('.slice-frame').getBoundingClientRect();
+              const edges = [...c.querySelectorAll('.carousel-crop-edge')].map((e) => {
+                const r = e.getBoundingClientRect();
+                return { left: (r.left - frame.left) / frame.width, width: r.width / frame.width };
+              });
+              return { note: c.querySelector('.carousel-crop-note')?.textContent ?? null, edges };
+            })
+          );
+        const none = { note: null, edges: [] };
+        // Expected hint for a card cut by `pct` percent in total (half on each side), within 1 px of a ~150 px frame
+        const assertCropped = (hint, pct, label) => {
+          assert.equal(hint.note, `按 X 网页端，左右约裁掉 ${pct}%`, label);
+          assert.equal(hint.edges.length, 2, `${label}: both edges marked`);
+          const [left, right] = hint.edges.sort((a, b) => a.left - b.left);
+          assert.ok(Math.abs(left.left) < 0.01, `${label}: left edge starts at the frame edge`);
+          assert.ok(Math.abs(right.left + right.width - 1) < 0.01, `${label}: right edge ends at the frame edge`);
+          for (const edge of [left, right]) {
+            assert.ok(Math.abs(edge.width - pct / 200) < 0.01, `${label}: each edge marks half the cut (${edge.width})`);
+          }
+        };
+
+        // 29a. 左右等分 2 张 of 300×100: two 1.5:1 slices. X shows them at 0.68W high, capped at 0.8W wide,
+        // so each loses 1 − 0.8 / 1.02 ≈ 22% (the 2-image sample in docs/discovery.md, both cut to 1.178:1)
+        const wide = createPatternPng(300, 100);
+        const widePath = writeTempFile(tmpDir, 'carousel-300x100.png', wide.buffer);
+        await resetComposer();
+        await entryBtn.click();
+        let modal = await getModalLocators(page);
+        await modal.sliceCountInput.fill('2');
+        await modal.fileInput.setInputFiles(widePath);
+        await waitForSlicePreview(page, 2);
+        let hints = await cropHints(modal);
+        assertCropped(hints[0], 22, '29a slice 1');
+        assertCropped(hints[1], 22, '29a slice 2');
+      } finally {
         await evaluateInExtensionWorld(page, `chrome.storage.local.clear()`);
       }
     });
